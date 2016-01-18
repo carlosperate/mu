@@ -20,14 +20,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import keyword
 import os
 import sys
-from PyQt5.QtCore import QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, pyqtSignal, QIODevice
 from PyQt5.QtWidgets import (QToolBar, QAction, QStackedWidget, QDesktopWidget,
                              QWidget, QVBoxLayout, QShortcut, QSplitter,
-                             QTabWidget, QFileDialog, QMessageBox)
-from PyQt5.QtGui import QKeySequence, QColor, QFont
+                             QTabWidget, QFileDialog, QMessageBox, QTextEdit)
+from PyQt5.QtGui import QKeySequence, QColor, QFont, QTextCursor
 from PyQt5.Qsci import QsciScintilla, QsciLexerPython
+from PyQt5.QtSerialPort import QSerialPort
 from mu.resources import load_icon
-from mu.repl import REPLPane
 
 
 # FONT related constants:
@@ -40,30 +40,32 @@ elif sys.platform == 'darwin':
     DEFAULT_FONT = 'Monaco'
 
 
-DARK_STYLE = """QStackedWidget, QWidget
+NIGHT_STYLE = """QStackedWidget, QWidget
 {
     background-color: black;
     color: white;
 }
 
-QToolButton {
-    min-width: 72px;
-}
-
 QToolButton:hover {
     color: red;
+}
+
+QTextEdit {
+    background-color: black;
+    color: white
 }
 """
 
 
-LIGHT_STYLE = """QStackedWidget, QWidget
+DAY_STYLE = """QStackedWidget, QWidget
 {
     background-color: #EEE;
     color: black;
 }
 
-QToolButton {
-    min-width: 72px;
+QTextEdit {
+    background-color: white;
+    color: black
 }
 """
 
@@ -185,20 +187,6 @@ class EditorPane(QsciScintilla):
         self.setModified(False)
         self.configure()
 
-    @property
-    def modified(self):
-        """
-        Returns if the code in the editor has been modified since last save.
-        """
-        return self.isModified()
-
-    @modified.setter
-    def modified(self, value):
-        """
-        Sets the modified flag.
-        """
-        self.setModified(value)
-
     def configure(self):
         """
         Set up the editor component.
@@ -288,16 +276,24 @@ class ButtonBar(QToolBar):
         self.addAction(name="quit", tool_text="Quit the application.")
 
     def addAction(self, name, tool_text):
+        """
+        Creates an action associated with an icon and name and adds it to the
+        widget's slots.
+        """
         action = QAction(load_icon(name), name.capitalize(), self,
                          statusTip=tool_text)
         super().addAction(action)
         self.slots[name] = action
 
-    def connect(self, name, slot, *shortcuts):
-        self.slots[name].pyqtConfigure(triggered=slot)
+    def connect(self, name, handler, *shortcuts):
+        """
+        Connects a named slot to a handler function and optional hot-key
+        shortcuts.
+        """
+        self.slots[name].pyqtConfigure(triggered=handler)
         for shortcut in shortcuts:
             QShortcut(QKeySequence(shortcut),
-                      self.parentWidget()).activated.connect(slot)
+                      self.parentWidget()).activated.connect(handler)
 
 
 class Window(QStackedWidget):
@@ -326,14 +322,12 @@ class Window(QStackedWidget):
         return self.tabs.currentWidget()
 
     def get_load_path(self, folder):
-        path, _ = QFileDialog.getOpenFileName(self.widget,
-                                              'Open file', folder,
+        path, _ = QFileDialog.getOpenFileName(self.widget, 'Open file', folder,
                                               '*.py *.hex')
         return path
 
     def get_save_path(self, folder):
-        path, _ = QFileDialog.getSaveFileName(self.widget,
-                                              'Save file', folder)
+        path, _ = QFileDialog.getSaveFileName(self.widget, 'Save file', folder)
         return path
 
     def add_tab(self, path, text):
@@ -360,7 +354,7 @@ class Window(QStackedWidget):
     @property
     def modified(self):
         for widget in self.widgets:
-            if widget.modified:
+            if widget.isModified():
                 return True
         return False
 
@@ -368,9 +362,8 @@ class Window(QStackedWidget):
         """
         Adds the REPL pane to the application.
         """
-        replpane = REPLPane(port=repl.port, theme=self.theme)
-        self.repl = replpane
-        self.splitter.addWidget(replpane)
+        self.repl = REPLPane(port=repl.port, theme=self.theme)
+        self.splitter.addWidget(self.repl)
         self.splitter.setSizes([66, 33])
         self.repl.setFocus()
         self.connect_zoom(self.repl)
@@ -387,14 +380,14 @@ class Window(QStackedWidget):
         """
         Sets the theme for the REPL and editor tabs.
         """
-        self.setStyleSheet(LIGHT_STYLE)
+        self.setStyleSheet(DAY_STYLE)
         self.theme = theme
         new_theme = DayTheme
         new_icon = 'theme'
         if theme == 'night':
             new_theme = NightTheme
             new_icon = 'theme_day'
-            self.setStyleSheet(DARK_STYLE)
+            self.setStyleSheet(NIGHT_STYLE)
         for widget in self.widgets:
             widget.set_theme(new_theme)
         self.button_bar.slots['theme'].setIcon(load_icon(new_icon))
@@ -508,3 +501,106 @@ class Window(QStackedWidget):
         self.set_theme(theme)
         self.show()
         self.autosize_window()
+
+
+class REPLPane(QTextEdit):
+    """
+    REPL = Read, Evaluate, Print, Loop.
+
+    This widget represents a REPL client connected to a BBC micro:bit.
+    """
+
+    def __init__(self, port, theme='day', parent=None):
+        super().__init__(parent)
+        self.setFont(QFont('Courier', 14))
+        self.setAcceptRichText(False)
+        self.setReadOnly(False)
+        self.setLineWrapMode(QTextEdit.NoWrap)
+        self.setObjectName('replpane')
+        # open the serial port
+        self.serial = QSerialPort(self)
+        self.serial.setPortName(port)
+        self.serial.setBaudRate(115200)
+        if self.serial.open(QIODevice.ReadWrite):
+            # TODO: What if the device is not sending bytes because it's in
+            # an infinite loop..?
+            self.serial.readyRead.connect(self.on_serial_read)
+            # clear the text
+            self.clear()
+            # Send a Control-C
+            self.serial.write(b'\x03')
+        else:
+            raise IOError("Cannot connect to device on port {}".format(port))
+        self.set_theme(theme)
+
+    def set_theme(self, theme):
+        """
+        Sets the theme / look for the REPL pane.
+        """
+        if theme == 'day':
+            self.setStyleSheet(DAY_STYLE)
+        else:
+            self.setStyleSheet(NIGHT_STYLE)
+
+    def on_serial_read(self):
+        """
+        Called when the application gets data from the connected device.
+        """
+        self.process_bytes(bytes(self.serial.readAll()))
+
+    def keyPressEvent(self, data):
+        """
+        Called when the user types something in the REPL.
+
+        Correctly encodes it and sends it to the connected device.
+        """
+        key = data.key()
+        msg = bytes(data.text(), 'utf8')
+
+        if key == Qt.Key_Backspace:
+            msg = b'\b'
+        elif key == Qt.Key_Up:
+            msg = b'\x1B[A'
+        elif key == Qt.Key_Down:
+            msg = b'\x1B[B'
+        elif key == Qt.Key_Right:
+            msg = b'\x1B[C'
+        elif key == Qt.Key_Left:
+            msg = b'\x1B[D'
+        elif data.modifiers() == Qt.MetaModifier:
+            # Handle the Control key.  I would've expected us to have to test
+            # for Qt.ControlModifier, but on (my!) OSX Qt.MetaModifier does
+            # correspond to the Control key.  I've read something that suggests
+            # that it's different on other platforms.
+            if Qt.Key_A <= key <= Qt.Key_Z:
+                # The microbit treats an input of \x01 as Ctrl+A, etc.
+                msg = bytes([1 + key - Qt.Key_A])
+        self.serial.write(msg)
+
+    def process_bytes(self, bs):
+        """
+        Given some incoming bytes of data, works out how to handle / display
+        them in the REPL widget.
+        """
+        tc = self.textCursor()
+        # The text cursor must be on the last line of the document. If it isn't
+        # then move it there.
+        while tc.movePosition(QTextCursor.Down):
+            pass
+        for b in bs:
+            if b == 8:  # \b
+                tc.movePosition(QTextCursor.Left)
+                self.setTextCursor(tc)
+            elif b == 13:  # \r
+                pass
+            else:
+                tc.deleteChar()
+                self.setTextCursor(tc)
+                self.insertPlainText(chr(b))
+        self.ensureCursorVisible()
+
+    def clear(self):
+        """
+        Clears the text of the REPL.
+        """
+        self.setText('')
