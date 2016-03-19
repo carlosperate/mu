@@ -2,3 +2,7 @@ include mu/*
 include README.rst
 include LICENSE
 include conf/*
+include mu/resources/css/*
+include mu/resources/images/*
+include mu/resources/fonts/*
+include run.py

@@ -19,55 +19,31 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 import keyword
 import os
-import sys
+import logging
 from PyQt5.QtCore import QSize, Qt, pyqtSignal, QIODevice
 from PyQt5.QtWidgets import (QToolBar, QAction, QStackedWidget, QDesktopWidget,
                              QWidget, QVBoxLayout, QShortcut, QSplitter,
                              QTabWidget, QFileDialog, QMessageBox, QTextEdit)
-from PyQt5.QtGui import QKeySequence, QColor, QFont, QTextCursor
+from PyQt5.QtGui import QKeySequence, QColor, QTextCursor, QFontDatabase
 from PyQt5.Qsci import QsciScintilla, QsciLexerPython
 from PyQt5.QtSerialPort import QSerialPort
-from mu.resources import load_icon
+from mu.resources import load_icon, load_stylesheet, load_font_data
 
-
-# FONT related constants:
+#: The default font size.
 DEFAULT_FONT_SIZE = 14
-DEFAULT_FONT = 'Bitstream Vera Sans Mono'
-# Platform specific alternatives...
-if sys.platform == 'win32':
-    DEFAULT_FONT = 'Consolas'
-elif sys.platform == 'darwin':
-    DEFAULT_FONT = 'Monaco'
+#: All editor windows use the same font
+FONT_NAME = "Source Code Pro"
+FONT_FILENAME_PATTERN = "SourceCodePro-{variant}.otf"
+FONT_VARIANTS = ("Bold", "BoldIt", "It", "Regular", "Semibold", "SemiboldIt")
+
+# Load the two themes from resources/css/[night|day].css
+#: NIGHT_STYLE is a dark high contrast theme.
+NIGHT_STYLE = load_stylesheet('night.css')
+#: DAY_STYLE is a light conventional theme.
+DAY_STYLE = load_stylesheet('day.css')
 
 
-NIGHT_STYLE = """QStackedWidget, QWidget
-{
-    background-color: black;
-    color: white;
-}
-
-QToolButton:hover {
-    color: red;
-}
-
-QTextEdit {
-    background-color: black;
-    color: white
-}
-"""
-
-
-DAY_STYLE = """QStackedWidget, QWidget
-{
-    background-color: #EEE;
-    color: black;
-}
-
-QTextEdit {
-    background-color: white;
-    color: black
-}
-"""
+logger = logging.getLogger(__name__)
 
 
 class Font:
@@ -75,25 +51,59 @@ class Font:
     Utility class that makes it easy to set font related values within the
     editor.
     """
+    _DATABASE = None
+
     def __init__(self, color='black', paper='white', bold=False, italic=False):
         self.color = color
         self.paper = paper
         self.bold = bold
         self.italic = italic
 
+    @classmethod
+    def get_database(cls):
+        """
+        Create a font database and load the MU builtin fonts into it.
+        This is a cached classmethod so the font files aren't re-loaded
+        every time a font is refereced
+        """
+        if cls._DATABASE is None:
+            cls._DATABASE = QFontDatabase()
+            for variant in FONT_VARIANTS:
+                filename = FONT_FILENAME_PATTERN.format(variant=variant)
+                font_data = load_font_data(filename)
+                cls._DATABASE.addApplicationFontFromData(font_data)
+        return cls._DATABASE
+
+    def load(self, size=DEFAULT_FONT_SIZE):
+        """
+        Load the font from the font database, using the correct size and style
+        """
+        return Font.get_database().font(FONT_NAME, self.stylename, size)
+
+    @property
+    def stylename(self):
+        """
+        Map the bold and italic boolean flags here to a relevant
+        font style name.
+        """
+        if self.bold:
+            if self.italic:
+                return "Semibold Italic"
+            return "Semibold"
+        if self.italic:
+            return "Italic"
+        return "Regular"
+
 
 class Theme:
     """
-    Defines a font and other theme related information.
+    Defines a font and other theme specific related information.
     """
 
     @classmethod
     def apply_to(cls, lexer):
         # Apply a font for all styles
-        font = QFont(DEFAULT_FONT, DEFAULT_FONT_SIZE)
-        font.setBold(False)
-        font.setItalic(False)
-        lexer.setFont(font)
+        lexer.setFont(Font().load())
 
         for name, font in cls.__dict__.items():
             if not isinstance(font, Font):
@@ -102,18 +112,17 @@ class Theme:
             lexer.setColor(QColor(font.color), style_num)
             lexer.setEolFill(True, style_num)
             lexer.setPaper(QColor(font.paper), style_num)
-            if font.bold or font.italic:
-                f = QFont(DEFAULT_FONT, DEFAULT_FONT_SIZE)
-                f.setBold(font.bold)
-                f.setItalic(font.italic)
-                lexer.setFont(f, style_num)
+            lexer.setFont(font.load(), style_num)
 
 
 class DayTheme(Theme):
     """
     Defines a Python related theme including the various font colours for
     syntax highlighting.
+
+    This is a light theme.
     """
+
     FunctionMethodName = ClassName = Font(color='#0000a0')
     UnclosedString = Font(paper='#FFDDDD')
     Comment = CommentBlock = Font(color='gray')
@@ -134,7 +143,10 @@ class NightTheme(Theme):
     """
     Defines a Python related theme including the various font colours for
     syntax highlighting.
+
+    This is the dark / high contrast theme.
     """
+
     FunctionMethodName = ClassName = Font(color='#AAA', paper='black')
     UnclosedString = Font(paper='#666')
     Comment = CommentBlock = Font(color='#AAA', paper='black')
@@ -192,9 +204,8 @@ class EditorPane(QsciScintilla):
         Set up the editor component.
         """
         # Font information
-        font = QFont(DEFAULT_FONT)
-        font.setFixedPitch(True)
-        font.setPointSize(DEFAULT_FONT_SIZE)
+
+        font = Font().load()
         self.setFont(font)
         # Generic editor settings
         self.setUtf8(True)
@@ -211,8 +222,8 @@ class EditorPane(QsciScintilla):
 
     def set_theme(self, theme=DayTheme):
         """
-        Connect the theme and lexer and return the lexer for the editor to
-        apply to the text in the editor.
+        Connect the theme to a lexer and return the lexer for the editor to
+        apply to the script text.
         """
         self.lexer = PythonLexer()
         theme.apply_to(self.lexer)
@@ -227,6 +238,9 @@ class EditorPane(QsciScintilla):
         """
         The label associated with this editor widget (usually the filename of
         the script we're editing).
+
+        If the script has been modified since it was last saved, the label will
+        end with an asterisk.
         """
         if self.path:
             label = os.path.basename(self.path)
@@ -308,29 +322,66 @@ class Window(QStackedWidget):
     _zoom_out = pyqtSignal(int)
 
     def zoom_in(self):
+        """
+        Handles zooming in.
+        """
         self._zoom_in.emit(2)
 
     def zoom_out(self):
+        """
+        Handles zooming out.
+        """
         self._zoom_out.emit(2)
 
     def connect_zoom(self, widget):
+        """
+        Connects a referenced widget to the zoom related signals.
+        """
         self._zoom_in.connect(widget.zoomIn)
         self._zoom_out.connect(widget.zoomOut)
 
     @property
     def current_tab(self):
+        """
+        Returns the currently focussed tab.
+        """
         return self.tabs.currentWidget()
 
     def get_load_path(self, folder):
+        """
+        Displays a dialog for selecting a file to load. Returns the selected
+        path. Defaults to start in the referenced folder.
+        """
         path, _ = QFileDialog.getOpenFileName(self.widget, 'Open file', folder,
                                               '*.py *.hex')
+        logger.debug('Getting load path: {}'.format(path))
         return path
 
     def get_save_path(self, folder):
+        """
+        Displays a dialog for selecting a file to save. Returns the selected
+        path. Defaults to start in the referenced folder.
+        """
         path, _ = QFileDialog.getSaveFileName(self.widget, 'Save file', folder)
+        logger.debug('Getting save path: {}'.format(path))
+        return path
+
+    def get_microbit_path(self, folder):
+        """
+        Displays a dialog for locating the location of the BBC micro:bit in the
+        host computer's filesystem. Returns the selected path. Defaults to
+        start in the referenced folder.
+        """
+        path = QFileDialog.getExistingDirectory(self.widget,
+                                                'Locate BBC micro:bit', folder,
+                                                QFileDialog.ShowDirsOnly)
+        logger.debug('Getting micro:bit path: {}'.format(path))
         return path
 
     def add_tab(self, path, text):
+        """
+        Adds a tab with the referenced path and text to the editor.
+        """
         new_tab = EditorPane(path, text)
         new_tab_index = self.tabs.addTab(new_tab, new_tab.label)
 
@@ -345,14 +396,25 @@ class Window(QStackedWidget):
 
     @property
     def tab_count(self):
+        """
+        Returns the number of active tabs.
+        """
         return self.tabs.count()
 
     @property
     def widgets(self):
+        """
+        Returns a list of references to the widgets representing tabs in the
+        editor.
+        """
         return [self.tabs.widget(i) for i in range(self.tab_count)]
 
     @property
     def modified(self):
+        """
+        Returns a boolean indication if there are any modified tabs in the
+        editor.
+        """
         for widget in self.widgets:
             if widget.isModified():
                 return True
@@ -415,6 +477,8 @@ class Window(QStackedWidget):
             message_box.setIcon(getattr(message_box, icon))
         else:
             message_box.setIcon(message_box.Warning)
+        logger.debug(message)
+        logger.debug(information)
         message_box.exec()
 
     def show_confirmation(self, message, information=None, icon=None):
@@ -441,6 +505,8 @@ class Window(QStackedWidget):
             message_box.setIcon(message_box.Warning)
         message_box.setStandardButtons(message_box.Cancel | message_box.Ok)
         message_box.setDefaultButton(message_box.Cancel)
+        logger.debug(message)
+        logger.debug(information)
         return message_box.exec()
 
     def update_title(self, filename=None):
@@ -507,23 +573,23 @@ class REPLPane(QTextEdit):
     """
     REPL = Read, Evaluate, Print, Loop.
 
-    This widget represents a REPL client connected to a BBC micro:bit.
+    This widget represents a REPL client connected to a BBC micro:bit running
+    MicroPython.
+
+    The device MUST be flashed with MicroPython for this to work.
     """
 
     def __init__(self, port, theme='day', parent=None):
         super().__init__(parent)
-        self.setFont(QFont('Courier', 14))
+        self.setFont(Font().load())
         self.setAcceptRichText(False)
         self.setReadOnly(False)
-        self.setLineWrapMode(QTextEdit.NoWrap)
         self.setObjectName('replpane')
         # open the serial port
         self.serial = QSerialPort(self)
         self.serial.setPortName(port)
-        self.serial.setBaudRate(115200)
         if self.serial.open(QIODevice.ReadWrite):
-            # TODO: What if the device is not sending bytes because it's in
-            # an infinite loop..?
+            self.serial.setBaudRate(115200)
             self.serial.readyRead.connect(self.on_serial_read)
             # clear the text
             self.clear()
@@ -579,7 +645,7 @@ class REPLPane(QTextEdit):
 
     def process_bytes(self, bs):
         """
-        Given some incoming bytes of data, works out how to handle / display
+        Given some incoming bytes of data, work out how to handle / display
         them in the REPL widget.
         """
         tc = self.textCursor()

@@ -10,11 +10,11 @@ from PyQt5.QtGui import QIcon, QPixmap
 def test_path():
     """
     Ensure the resource_filename function is called with the expected args and
-    the path function returns its result.
+    the path function under test returns its result.
     """
-    with mock.patch('mu.resources.resource_filename', return_value=True) as rf:
-        assert mu.resources.path('foo')
-        rf.assert_called_once_with(mu.resources.__name__, 'images/foo')
+    with mock.patch('mu.resources.resource_filename', return_value='bar') as r:
+        assert mu.resources.path('foo') == 'bar'
+        r.assert_called_once_with(mu.resources.__name__, 'images/foo')
 
 
 def test_load_icon():
@@ -41,3 +41,12 @@ def test_stylesheet():
     with mock.patch('mu.resources.resource_string', return_value=b'foo') as rs:
         assert 'foo' == mu.resources.load_stylesheet('foo')
         rs.assert_called_once_with(mu.resources.__name__, 'css/foo')
+
+
+def test_load_font_data():
+    """
+    Ensure font data can be loaded
+    """
+    with mock.patch('mu.resources.resource_string', return_value=b'foo') as rs:
+        assert b'foo' == mu.resources.load_font_data('foo')
+        rs.assert_called_once_with(mu.resources.__name__, 'fonts/foo')
