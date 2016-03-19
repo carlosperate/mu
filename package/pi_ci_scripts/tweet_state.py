@@ -1,12 +1,30 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+#
+# Script to tweet a message for the Raspberry Pi CI/build server.
+#
+# It requires all command line arguments to be provided and based on those it
+# will create a message and tweet it to the account set up in the tweet_data.py
+# file.
+# As this file contains login information it is not included in the repository,
+# all the file contains is:
+# CONSUMER_KEY    = '********** YOUR INFO **********'
+# CONSUMER_SECRET = '********** YOUR INFO **********'
+# ACCESS_KEY      = '********** YOUR INFO **********'
+# ACCESS_SECRET   = '********** YOUR INFO **********'
+#
+# This script should work on both Python 2 and 3.
+#
 from __future__ import unicode_literals, absolute_import, print_function
 import sys
 import optparse
-from twython import Twython
+#from twython import Twython
 
 # This file is excluded from the repository and contains account data
 import twitter_data as td
+
+TWITTER_ACCOUNTS_TO_NOTIFY = ["@carlosperate"]
+TWEET_LENGTH = 140
 
 
 def process_cmd_args():
@@ -43,10 +61,11 @@ def prepare_msg(project, build, state):
     """
     msg = None
     if state == 'pass':
-        msg = "Hurray! The %s build %s has passed!!!" % (project, build)
+        msg = "Hurray! %s build %s has passed!!!" % (project, build)
     elif state == 'fail':
-        msg = "Oh no! Something broke %s build %s!!! @carlosperate" % \
-              (project, build)
+        msg = "Oh no! Something broke %s build %s!!!" % (project, build)
+        for account in TWITTER_ACCOUNTS_TO_NOTIFY:
+            msg += " %s" % account
     elif state == 'work':
         msg = "Another day, another dollar, working on %s build %s..." % \
               (project, build)
@@ -56,23 +75,46 @@ def prepare_msg(project, build, state):
 
 def tweet_msg(msg):
     """
-    :param msg: Message to tweet, must be less than 140 characters long.
+    :param msg: Message to tweet, must be less than TWEET_LENGTH characters.
     """
-    if len(msg) > 140:
-        print("The prepared message is larger than 140 characters (%s):\n\t%s"
-              % (len(msg), msg))
+    if len(msg) > TWEET_LENGTH:
+        print("Error: Message is too long for twitter (%s chars):\n\t%s") % \
+              (len(msg), msg)
+        tweet_error("Error: Prepared message > %s chars!" % TWEET_LENGTH)
         exit()
+
     twitter = Twython(td.CONSUMER_KEY, td.CONSUMER_SECRET,
                       td.ACCESS_KEY, td.ACCESS_SECRET)
     twitter.update_status(status=msg)
     print("Twitter message (%s characters):\n\t%s" % (len(msg), msg))
 
 
+def tweet_error(msg):
+    """
+    :param msg: Error message to tweet, will get trimmed to fit twitter length.
+    """
+    mentions = ""
+    for account in TWITTER_ACCOUNTS_TO_NOTIFY:
+            mentions += " %s" % account
+    if len(msg) > (TWEET_LENGTH - len(mentions)):
+        msg = msg[:(TWEET_LENGTH - len(mentions))]
+    msg += mentions
+
+    twitter = Twython(td.CONSUMER_KEY, td.CONSUMER_SECRET,
+                      td.ACCESS_KEY, td.ACCESS_SECRET)
+    twitter.update_status(status=msg)
+    print("Twitter ERROR message (%s characters):\n\t%s" % (len(msg), msg))
+
+
 def main():
+    if len(TWITTER_ACCOUNTS_TO_NOTIFY) > 75:
+        print("There are too many Twitter accounts to notify.")
+        exit()
+
     project, build, state = process_cmd_args()
     msg = prepare_msg(project, build, state)
     if msg is None:
-        "The twitter message could not be created."
+        tweet_error("The twitter message could not be created!")
         exit()
     tweet_msg(msg)
 
