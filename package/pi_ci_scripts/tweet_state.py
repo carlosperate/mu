@@ -18,7 +18,7 @@
 from __future__ import unicode_literals, absolute_import, print_function
 import sys
 import optparse
-#from twython import Twython
+from twython import Twython
 
 # This file is excluded from the repository and contains account data
 import twitter_data as td
@@ -61,7 +61,7 @@ def prepare_msg(project, build, state):
     """
     msg = None
     if state == 'pass':
-        msg = "Hurray! %s build %s has passed!!!" % (project, build)
+        msg = "Hurray! %s build %s has passed!!! http://bit.ly/1UrVNml" % (project, build)
     elif state == 'fail':
         msg = "Oh no! Something broke %s build %s!!!" % (project, build)
         for account in TWITTER_ACCOUNTS_TO_NOTIFY:

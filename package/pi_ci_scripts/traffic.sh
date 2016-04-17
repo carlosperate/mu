@@ -61,6 +61,7 @@ if [ ! -d "/sys/class/gpio/gpio$red_light/" ]; then
 fi
 echo "out" > "/sys/class/gpio/gpio$red_light/direction"
 
+
 if [ $# -eq 0 ]; then
     echo -e "This script requires an argument. Options are:
     on
