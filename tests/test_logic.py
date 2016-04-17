@@ -24,7 +24,7 @@ def test_CONSTANTS():
     Ensure the expected constants exist.
     """
     assert mu.logic.HOME_DIRECTORY
-    assert mu.logic.MICROPYTHON_DIRECTORY
+    assert mu.logic.PYTHON_DIRECTORY
     assert mu.logic.DATA_DIR
     assert mu.logic.SETTINGS_FILE
     # These should NEVER change.
@@ -98,7 +98,8 @@ def test_REPL_unsupported():
 
 def test_editor_init():
     """
-    Ensure a new instance is set-up correctly.
+    Ensure a new instance is set-up correctly and creates the required folders
+    upon first start.
     """
     view = mock.MagicMock()
     # Check the editor attempts to create required directories if they don't
@@ -110,7 +111,7 @@ def test_editor_init():
         assert e.repl is None
         assert e.theme == 'day'
         assert mkd.call_count == 2
-        assert mkd.call_args_list[0][0][0] == mu.logic.MICROPYTHON_DIRECTORY
+        assert mkd.call_args_list[0][0][0] == mu.logic.PYTHON_DIRECTORY
         assert mkd.call_args_list[1][0][0] == mu.logic.DATA_DIR
 
 
@@ -183,6 +184,7 @@ def test_flash_with_attached_device():
     with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
             mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
             mock.patch('mu.logic.uflash.find_microbit', return_value='bar'),\
+            mock.patch('mu.logic.os.path.exists', return_value=True),\
             mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
         view = mock.MagicMock()
         view.current_tab.text = mock.MagicMock(return_value='')
@@ -194,21 +196,110 @@ def test_flash_with_attached_device():
         s.assert_called_once_with('foo', hex_file_path)
 
 
-def test_flash_without_device():
+def test_flash_user_specified_device_path():
     """
-    If no device is found then ensure a helpful status messgae is enacted.
+    Ensure that if a micro:bit is not automatically found by uflash then it
+    prompts the user to locate the device and, assuming a path was given,
+    saves the hex in the expected location.
     """
     with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
             mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
-            mock.patch('mu.logic.uflash.find_microbit', return_value=''), \
+            mock.patch('mu.logic.uflash.find_microbit', return_value=None),\
+            mock.patch('mu.logic.os.path.exists', return_value=True),\
+            mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
+        view = mock.MagicMock()
+        view.get_microbit_path = mock.MagicMock(return_value='bar')
+        view.current_tab.text = mock.MagicMock(return_value='')
+        view.show_message = mock.MagicMock()
+        ed = mu.logic.Editor(view)
+        ed.flash()
+        home = mu.logic.HOME_DIRECTORY
+        view.get_microbit_path.assert_called_once_with(home)
+        assert view.show_message.call_count == 1
+        assert ed.user_defined_microbit_path == 'bar'
+        hex_file_path = os.path.join('bar', 'micropython.hex')
+        s.assert_called_once_with('foo', hex_file_path)
+
+
+def test_flash_existing_user_specified_device_path():
+    """
+    Ensure that if a micro:bit is not automatically found by uflash and the
+    user has previously specified a path to the device, then the hex is saved
+    in the specified location.
+    """
+    with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
+            mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
+            mock.patch('mu.logic.uflash.find_microbit', return_value=None),\
+            mock.patch('mu.logic.os.path.exists', return_value=True),\
+            mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
+        view = mock.MagicMock()
+        view.get_microbit_path = mock.MagicMock(return_value='bar')
+        view.current_tab.text = mock.MagicMock(return_value='')
+        view.show_message = mock.MagicMock()
+        ed = mu.logic.Editor(view)
+        ed.user_defined_microbit_path = 'baz'
+        ed.flash()
+        assert view.get_microbit_path.call_count == 0
+        assert view.show_message.call_count == 1
+        hex_file_path = os.path.join('baz', 'micropython.hex')
+        s.assert_called_once_with('foo', hex_file_path)
+
+
+def test_flash_path_specified_does_not_exist():
+    """
+    Ensure that if a micro:bit is not automatically found by uflash and the
+    user has previously specified a path to the device, then the hex is saved
+    in the specified location.
+    """
+    with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
+            mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
+            mock.patch('mu.logic.uflash.find_microbit', return_value=None),\
+            mock.patch('mu.logic.os.path.exists', return_value=False),\
+            mock.patch('mu.logic.os.makedirs', return_value=None), \
             mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
         view = mock.MagicMock()
         view.current_tab.text = mock.MagicMock(return_value='')
         view.show_message = mock.MagicMock()
         ed = mu.logic.Editor(view)
+        ed.user_defined_microbit_path = 'baz'
         ed.flash()
         message = 'Could not find an attached BBC micro:bit.'
-        view.show_message.assert_called_once_with(message)
+        information = ("Please ensure you leave enough time for the BBC"
+                       " micro:bit to be attached and configured correctly"
+                       " by your computer. This may take several seconds."
+                       " Alternatively, try removing and re-attaching the"
+                       " device or saving your work and restarting Mu if"
+                       " the device remains unfound.")
+        view.show_message.assert_called_once_with(message, information)
+        assert s.call_count == 0
+        assert ed.user_defined_microbit_path is None
+
+
+def test_flash_without_device():
+    """
+    If no device is found and the user doesn't provide a path then ensure a
+    helpful status message is enacted.
+    """
+    with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
+            mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
+            mock.patch('mu.logic.uflash.find_microbit', return_value=None), \
+            mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
+        view = mock.MagicMock()
+        view.get_microbit_path = mock.MagicMock(return_value=None)
+        view.current_tab.text = mock.MagicMock(return_value='')
+        view.show_message = mock.MagicMock()
+        ed = mu.logic.Editor(view)
+        ed.flash()
+        message = 'Could not find an attached BBC micro:bit.'
+        information = ("Please ensure you leave enough time for the BBC"
+                       " micro:bit to be attached and configured correctly"
+                       " by your computer. This may take several seconds."
+                       " Alternatively, try removing and re-attaching the"
+                       " device or saving your work and restarting Mu if"
+                       " the device remains unfound.")
+        view.show_message.assert_called_once_with(message, information)
+        home = mu.logic.HOME_DIRECTORY
+        view.get_microbit_path.assert_called_once_with(home)
         assert s.call_count == 0
 
 
@@ -253,6 +344,20 @@ def test_add_repl_ioerror():
         ed.add_repl()
     assert view.show_message.call_count == 1
     assert view.show_message.call_args[0][0] == str(ex)
+
+
+def test_add_repl_exception():
+    """
+    Ensure that any non-IOError based exceptions are logged.
+    """
+    view = mock.MagicMock()
+    ex = Exception('BOOM')
+    view.add_repl = mock.MagicMock(side_effect=ex)
+    ed = mu.logic.Editor(view)
+    with mock.patch('mu.logic.find_microbit', return_value='COM0'), \
+            mock.patch('mu.logic.logger', return_value=None) as logger:
+        ed.add_repl()
+        logger.error.assert_called_once_with(ex)
 
 
 def test_add_repl():
@@ -335,7 +440,7 @@ def test_toggle_theme_to_night():
 
 def test_toggle_theme_to_day():
     """
-    The current theme is 'day' so toggle to night. Expect the state to be
+    The current theme is 'night' so toggle to day. Expect the state to be
     updated and the appropriate call to the UI layer is made.
     """
     view = mock.MagicMock()
@@ -446,13 +551,13 @@ def test_save_no_path():
         ed.save()
     mock_open.assert_called_once_with('foo.py', 'w')
     mock_open.return_value.write.assert_called_once_with('foo')
-    view.get_save_path.assert_called_once_with(mu.logic.MICROPYTHON_DIRECTORY)
+    view.get_save_path.assert_called_once_with(mu.logic.PYTHON_DIRECTORY)
 
 
-def test_save_no_path_no_path_give():
+def test_save_no_path_no_path_given():
     """
     If there's no path associated with the tab and the user cancels providing
-    one ensure the path is correctly re-set.
+    one, ensure the path is correctly re-set.
     """
     view = mock.MagicMock()
     view.current_tab = mock.MagicMock()

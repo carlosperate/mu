@@ -1,14 +1,15 @@
 from setuptools import setup
+from mu import __version__
 
 
 setup(
     name='mu',
-    version='0.1',
-    description='A micro editor for MicroPython and the BBC micro:bit.',
+    version=__version__,
+    description='A simple editor for kids, teachers and new programmers.',
     author='Nicholas Tollervey',
     author_email='ntoll@ntoll.org',
     url='https://github.com/ntoll/mu',
-    packages=['mu'],
+    packages=['mu', 'mu.contrib', 'mu.resources'],
     include_package_data=True,
     zip_safe=False,
     classifiers=[
@@ -20,10 +21,10 @@ setup(
     ],
     entry_points={
         'console_scripts': [
-            "mu = mu.app.run",
+            "mu = mu.app:run",
         ],
     },
-    data_files=[('/etc/udev/rules.d', ['conf/90-usb-microbit.rule', ]),
+    data_files=[('/etc/udev/rules.d', ['conf/90-usb-microbit.rules', ]),
                 ('/usr/share/pixmaps', ['conf/mu.png', ]),
                 ('/usr/share/applications', ['conf/mu.desktop', ])],
 )

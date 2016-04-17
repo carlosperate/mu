@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Tests for the ui elements of Mu.
+Tests for the user interface elements of Mu.
 """
-from PyQt5.QtWidgets import QApplication, QAction, QWidget
+from PyQt5.QtWidgets import QApplication, QAction, QWidget, QFileDialog
 from PyQt5.QtCore import QIODevice, Qt, QSize
 from PyQt5.QtGui import QTextCursor, QIcon
 from unittest import mock
-from importlib import reload
 import mu.interface
 import pytest
 import keyword
@@ -24,24 +23,6 @@ def test_constants():
     """
     assert mu.interface.NIGHT_STYLE
     assert mu.interface.DAY_STYLE
-
-
-def test_Font_constants():
-    """
-    Check the platform specific font constants are applied.
-    """
-    with mock.patch('sys.platform', 'win32'):
-        reload(mu.interface)
-        assert mu.interface.DEFAULT_FONT_SIZE == 14
-        assert mu.interface.DEFAULT_FONT == 'Consolas'
-    with mock.patch('sys.platform', 'darwin'):
-        reload(mu.interface)
-        assert mu.interface.DEFAULT_FONT_SIZE == 14
-        assert mu.interface.DEFAULT_FONT == 'Monaco'
-    with mock.patch('sys.platform', 'posix'):
-        reload(mu.interface)
-        assert mu.interface.DEFAULT_FONT_SIZE == 14
-        assert mu.interface.DEFAULT_FONT == 'Bitstream Vera Sans Mono'
 
 
 def test_Font():
@@ -74,10 +55,29 @@ def test_theme_apply_to():
     lexer.setEolFill = mock.MagicMock(return_value=None)
     lexer.setPaper = mock.MagicMock(return_value=None)
     theme.apply_to(lexer)
-    assert lexer.setFont.call_count == 2
+    assert lexer.setFont.call_count == 17
     assert lexer.setColor.call_count == 16
     assert lexer.setEolFill.call_count == 16
     assert lexer.setPaper.call_count == 16
+
+
+def test_Font_loading():
+    mu.interface.Font._DATABASE = None
+    try:
+        with mock.patch("mu.interface.QFontDatabase") as db:
+            mu.interface.Font().load()
+            mu.interface.Font(bold=True).load()
+            mu.interface.Font(italic=True).load()
+            mu.interface.Font(bold=True, italic=True).load()
+    finally:
+        mu.interface.Font._DATABASE = None
+    db.assert_called_once_with()
+    db().font.assert_has_calls([
+        mock.call('Source Code Pro', 'Regular', 14),
+        mock.call('Source Code Pro', 'Semibold', 14),
+        mock.call('Source Code Pro', 'Italic', 14),
+        mock.call('Source Code Pro', 'Semibold Italic', 14),
+    ])
 
 
 def test_pythonlexer_keywords():
@@ -115,8 +115,8 @@ def test_EditorPane_init():
 
 def test_EditorPane_configure():
     """
-    Check the expected configuration takes place. NOTE - this is checking that
-    the expected attributes are configured, not what the actual configuration
+    Check the expected configuration takes place. NOTE - this is checking the
+    expected attributes are configured, not what the actual configuration
     values may be. I.e. we're checking that, say, setIndentationWidth is
     called.
     """
@@ -333,6 +333,25 @@ def test_Window_get_save_path():
         assert w.get_save_path('micropython') == path
     mock_fd.getSaveFileName.assert_called_once_with(w.widget, 'Save file',
                                                     'micropython')
+
+
+def test_Window_get_microbit_path():
+    """
+    Ensures the QFileDialog is called with the expected arguments and the
+    resulting path is returned.
+    """
+    mock_fd = mock.MagicMock()
+    path = '/foo'
+    ShowDirsOnly = QFileDialog.ShowDirsOnly
+    mock_fd.getExistingDirectory = mock.MagicMock(return_value=path)
+    mock_fd.ShowDirsOnly = ShowDirsOnly
+    w = mu.interface.Window()
+    with mock.patch('mu.interface.QFileDialog', mock_fd):
+        assert w.get_microbit_path('micropython') == path
+    title = 'Locate BBC micro:bit'
+    mock_fd.getExistingDirectory.assert_called_once_with(w.widget, title,
+                                                         'micropython',
+                                                         ShowDirsOnly)
 
 
 def test_Window_add_tab():
@@ -858,7 +877,7 @@ def test_REPLPane_keyPressEvent_down():
 
 def test_REPLPane_keyPressEvent_right():
     """
-    Ensure backspaces in the REPL are handled correctly.
+    Ensure right arrows in the REPL are handled correctly.
     """
     mock_serial = mock.MagicMock()
     mock_serial.setPortName = mock.MagicMock(return_value=None)
@@ -879,7 +898,7 @@ def test_REPLPane_keyPressEvent_right():
 
 def test_REPLPane_keyPressEvent_left():
     """
-    Ensure backspaces in the REPL are handled correctly.
+    Ensure left arrows in the REPL are handled correctly.
     """
     mock_serial = mock.MagicMock()
     mock_serial.setPortName = mock.MagicMock(return_value=None)
