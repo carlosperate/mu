@@ -15,6 +15,9 @@ sudo apt-get install python3-pyqt5 -y
 sudo apt-get install python3-pyqt5.qsci -y
 sudo apt-get install python3-pyqt5.qtserialport -y
 
+# Deb build packages
+sudo apt-get install git-buildpackage
+
 # Required for the Twitter python script
 sudo pip install twython
 
