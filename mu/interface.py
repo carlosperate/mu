@@ -161,7 +161,7 @@ class NightTheme(Theme):
     HighlightedIdentifier = Font(color='#ffffff', paper='black')
     Paper = QColor('black')
     Caret = QColor('white')
-    Margin = QColor('#111')
+    Margin = QColor('#333')
 
 
 class PythonLexer(QsciLexerPython):
@@ -308,6 +308,30 @@ class ButtonBar(QToolBar):
         for shortcut in shortcuts:
             QShortcut(QKeySequence(shortcut),
                       self.parentWidget()).activated.connect(handler)
+
+
+class FileTabs(QTabWidget):
+    """
+    Extend the base class so we can override the removeTab behaviour.
+    """
+
+    def __init__(self):
+        super(FileTabs, self).__init__()
+        self.setTabsClosable(True)
+        self.tabCloseRequested.connect(self.removeTab)
+
+    def removeTab(self, tab_id):
+        """
+        Ask the user before closing the file.
+        """
+        window = self.nativeParentWidget()
+        modified = window.current_tab.isModified()
+        if (modified):
+            msg = 'There is un-saved work, closing the tab will cause you ' \
+                  'to lose it.'
+            if window.show_confirmation(msg) == QMessageBox.Cancel:
+                return
+        super(FileTabs, self).removeTab(tab_id)
 
 
 class Window(QStackedWidget):
@@ -552,13 +576,10 @@ class Window(QStackedWidget):
         self.widget.setLayout(widget_layout)
 
         self.button_bar = ButtonBar(self.widget)
-        self.tabs = QTabWidget()
-        self.tabs.setTabsClosable(True)
-        self.tabs.tabCloseRequested.connect(self.tabs.removeTab)
 
         widget_layout.addWidget(self.button_bar)
         widget_layout.addWidget(self.splitter)
-
+        self.tabs = FileTabs()
         self.splitter.addWidget(self.tabs)
 
         self.addWidget(self.widget)
