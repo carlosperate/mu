@@ -439,9 +439,9 @@ def test_Window_add_repl():
     """
     w = mu.interface.Window()
     w.theme = mock.MagicMock()
-    w.splitter = mock.MagicMock()
-    w.splitter.addWidget = mock.MagicMock(return_value=None)
-    w.splitter.setSizes = mock.MagicMock(return_value=None)
+    w.splitter_vertical = mock.MagicMock()
+    w.splitter_vertical.addWidget = mock.MagicMock(return_value=None)
+    w.splitter_vertical.setSizes = mock.MagicMock(return_value=None)
     w.connect_zoom = mock.MagicMock(return_value=None)
     mock_repl = mock.MagicMock()
     mock_repl.setFocus = mock.MagicMock(return_value=None)
@@ -453,8 +453,8 @@ def test_Window_add_repl():
     mock_repl_class.assert_called_once_with(port=mock_repl_arg.port,
                                             theme=w.theme)
     assert w.repl == mock_repl
-    w.splitter.addWidget.assert_called_once_with(mock_repl)
-    w.splitter.setSizes.assert_called_once_with([66, 33])
+    w.splitter_vertical.addWidget.assert_called_once_with(mock_repl)
+    w.splitter_vertical.setSizes.assert_called_once_with([66, 33])
     mock_repl.setFocus.assert_called_once_with()
     w.connect_zoom.assert_called_once_with(mock_repl)
 
@@ -703,7 +703,7 @@ def test_Window_setup():
     w.update_title.assert_called_once_with()
     w.setMinimumSize.assert_called_once_with(800, 600)
     assert w.widget == mock_widget
-    assert w.splitter == mock_splitter
+    assert w.splitter_vertical == mock_splitter
     w.widget.setLayout.assert_called_once_with(mock_layout)
     assert w.button_bar == mock_button_bar
     assert w.tabs == mock_qtw

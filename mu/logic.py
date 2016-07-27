@@ -63,6 +63,12 @@ TEMPLATES = [
         'path': os.path.join(PYTHON_DIRECTORY, 'micropython'),
         'default': 'from microbit import *\n\ndisplay.scroll("Hello, World!")',
     },
+    {
+        'name': 'Generate micro:bit MicroPython code from a blocks interface.',
+        'icon': 'blockly',
+        'path': os.path.join(PYTHON_DIRECTORY, 'blocks'),
+        'default': 'from microbit import *\n\ndisplay.scroll("Hello, World!")',
+    },
 ]
 try:
     import pgzero
@@ -121,6 +127,23 @@ class REPL:
         logger.info('Created new REPL object with port: {}'.format(self.port))
 
 
+class BlockEditor:
+    """
+    Represents the Block Editor displayed on the WebView.
+    """
+
+    def __init__(self, browser_interface):
+        self._browser = browser_interface
+        # TODO: Add hook to execute function on each blockly workspace change
+
+    def get_code(self):
+        microbit_code = self._browser.execute_js(
+                'Blockly.Python.workspaceToCode(Blockly.mainWorkspace)')
+        if not microbit_code:
+            microbit_code = ''
+        return microbit_code
+
+
 class Editor:
     """
     Application logic for the editor itself.
@@ -130,6 +153,8 @@ class Editor:
         logger.info('Setting up editor.')
         self._view = view
         self.repl = None
+        self.webview_left = None
+        self.webview_right = None
         self.theme = 'day'
         self.user_defined_microbit_path = None
         if not os.path.exists(PYTHON_DIRECTORY):
@@ -239,6 +264,11 @@ class Editor:
         """
         pass
 
+    def blocks(self):
+        """
+        """
+        self.toggle_blocks()
+
     def add_repl(self):
         """
         Detect a connected BBC micro:bit and if found, connect to the
@@ -289,6 +319,84 @@ class Editor:
             self.add_repl()
         else:
             self.remove_repl()
+
+    def add_blocks(self):
+        """
+        Enable the left WebView if not done already, set its URL to the
+        block editor.
+        """
+        blocks_url = 'http://192.168.56.1:8000/editor.html'
+        if self._view.webview_left is None:
+            logger.info('Starting left WebView in UI.')
+            self._view.add_webview_left(blocks_url)
+            self.webview_left = True
+        else:
+            self.load_url(blocks_url)
+        self.block_editor = BlockEditor(self._view.webview_left)
+
+        # FIXME: Temp hack to get the code continuously refreshing in the tab
+        self.set_tab_code()
+
+    def set_tab_code(self):
+        """
+        Temp hack mentioned above
+        """
+        from PyQt5.QtCore import QTimer
+        try:
+            self._view.current_tab.setText(self.block_editor.get_code())
+        finally:
+            QTimer.singleShot(1000, self.set_tab_code)
+
+    def remove_blocks(self):
+        """
+        If there's an active left WebView, disconnect and hide it.
+        """
+        if self.webview_left is None:
+            raise RuntimeError('Left WebView not running')
+        self._view.remove_webview_left()
+        self.webview_left = None
+        self.block_editor = None
+
+    def toggle_blocks(self):
+        """
+        If the blocks WebView is active, close it; otherwise create it.
+        """
+        if self.webview_left is None:
+            self.add_blocks()
+        else:
+            #self.remove_blocks()
+            self.block_editor.get_code()
+
+    def add_help(self):
+        """
+        Enable the right WebView if not done already, set its URL to the
+        help website.
+        """
+        help_url = 'http://codewith.mu/help/0.9.11/'
+        if self.webview_right is None:
+            logger.info('Starting right WebView in UI.')
+            self._view.add_webview_right(url=help_url, size_percent=30)
+            self.webview_right = True
+        else:
+            self.load_url(help_url)
+
+    def remove_help(self):
+        """
+        If there's an active right WebView, disconnect and hide it.
+        """
+        if self.webview_right is None:
+            raise RuntimeError("WebView not running")
+        self._view.remove_webview_right()
+        self.webview_right = None
+
+    def toggle_help(self):
+        """
+        If the help WebView is active, close it; otherwise create it.
+        """
+        if self.webview_right is None:
+            self.add_help()
+        else:
+            self.remove_help()
 
     def toggle_theme(self):
         """
@@ -389,7 +497,8 @@ class Editor:
         """
         Launches the user's browser to display the HTML based help for Mu.
         """
-        webbrowser.open_new('http://codewith.mu/help')
+        #webbrowser.open_new('http://codewith.mu/help')
+        self.toggle_help()
 
     def quit(self, *args, **kwargs):
         """

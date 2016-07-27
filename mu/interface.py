@@ -20,13 +20,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import keyword
 import os
 import logging
-from PyQt5.QtCore import QSize, Qt, pyqtSignal, QIODevice
+from PyQt5.QtCore import QSize, Qt, pyqtSignal, QIODevice, QUrl
 from PyQt5.QtWidgets import (QToolBar, QAction, QStackedWidget, QDesktopWidget,
                              QWidget, QVBoxLayout, QShortcut, QSplitter,
                              QTabWidget, QFileDialog, QMessageBox, QTextEdit,
                              QDialog, QListWidget, QListWidgetItem, QLabel,
                              QHBoxLayout, QLineEdit, QDialogButtonBox)
-from PyQt5.QtGui import QKeySequence, QColor, QTextCursor, QFontDatabase
+from PyQt5.QtWebKitWidgets import QWebPage, QWebView
+from PyQt5.QtGui import (QKeySequence, QColor, QTextCursor, QFontDatabase,
+                         QResizeEvent)
 from PyQt5.Qsci import QsciScintilla, QsciLexerPython
 from PyQt5.QtSerialPort import QSerialPort
 
@@ -68,8 +70,7 @@ class ProjectItem(QListWidgetItem):
     code.
     """
 
-    def __init__(self, name, icon, path, default,
-                 parent=None):
+    def __init__(self, name, icon, path, default, parent=None):
         """
         Configure a project template with a name, description of the sort of
         application to be built with such a template, associated icon, path for
@@ -356,32 +357,34 @@ class ButtonBar(QToolBar):
         self.setIconSize(QSize(64, 64))
         self.setToolButtonStyle(3)
         self.setContextMenuPolicy(Qt.PreventContextMenu)
-        self.setObjectName("StandardToolBar")
+        self.setObjectName('StandardToolBar')
 
-        self.addAction(name="new",
-                       tool_text="Create a new MicroPython script.")
-        self.addAction(name="load", tool_text="Load a MicroPython script.")
-        self.addAction(name="save",
-                       tool_text="Save the current MicroPython script.")
+        self.addAction(name='new',
+                       tool_text='Create a new MicroPython script.')
+        self.addAction(name='load', tool_text='Load a MicroPython script.')
+        self.addAction(name='save',
+                       tool_text='Save the current MicroPython script.')
         self.addSeparator()
-        self.addAction(name="run",
-                       tool_text="Run your Python script.")
-        self.addAction(name="flash",
-                       tool_text="Flash your code onto the micro:bit.")
-        self.addAction(name="play",
-                       tool_text="Play your PyGameZero game.")
-        self.addAction(name="repl",
-                       tool_text="Try stuff out in the Python REPL.")
+        self.addAction(name='run',
+                       tool_text='Run your Python script.')
+        self.addAction(name='flash',
+                       tool_text='Flash your code onto the micro:bit.')
+        self.addAction(name='play',
+                       tool_text='Play your PyGameZero game.')
+        self.addAction(name='blocks',
+                       tool_text='Toggle the block editing mode.')
+        self.addAction(name='repl',
+                       tool_text='Try stuff out in the Python REPL.')
         self.addSeparator()
-        self.addAction(name="zoom-in",
-                       tool_text="Zoom in (to make the text bigger).")
-        self.addAction(name="zoom-out",
-                       tool_text="Zoom out (to make the text smaller).")
-        self.addAction(name="theme",
-                       tool_text="Change theme between day or night.")
+        self.addAction(name='zoom-in',
+                       tool_text='Zoom in (to make the text bigger).')
+        self.addAction(name='zoom-out',
+                       tool_text='Zoom out (to make the text smaller).')
+        self.addAction(name='theme',
+                       tool_text='Change theme between day or night.')
         self.addSeparator()
-        self.addAction(name="help", tool_text="Show help about Mu.")
-        self.addAction(name="quit", tool_text="Quit the application.")
+        self.addAction(name='help', tool_text='Show help about Mu.')
+        self.addAction(name='quit', tool_text='Quit the application.')
 
     def addAction(self, name, tool_text):
         """
@@ -411,18 +414,25 @@ class ButtonBar(QToolBar):
         run = self.slots['run']
         flash = self.slots['flash']
         play = self.slots['play']
-        if 'micropython' in tab.path:
-            run.setVisible(False)
-            flash.setVisible(True)
-            play.setVisible(False)
-        elif 'pygamezero' in tab.path:
-            run.setVisible(False)
-            flash.setVisible(False)
-            play.setVisible(True)
-        else:
-            run.setVisible(True)
-            flash.setVisible(False)
-            play.setVisible(False)
+        blocks = self.slots['blocks']
+        if tab.path:
+            if 'micropython' in tab.path:
+                run.setVisible(False)
+                flash.setVisible(True)
+                play.setVisible(False)
+            elif 'pygamezero' in tab.path:
+                run.setVisible(False)
+                flash.setVisible(False)
+                play.setVisible(True)
+            elif 'blocks' in tab.path:
+                run.setVisible(True)
+                flash.setVisible(False)
+                play.setVisible(False)
+                blocks.setVisible(True)
+            else:
+                run.setVisible(True)
+                flash.setVisible(False)
+                play.setVisible(False)
 
 
 class Window(QStackedWidget):
@@ -568,8 +578,8 @@ class Window(QStackedWidget):
             self.repl.kernel_client = kernel_client
             self._zoom_in.connect(self.repl._increase_font_size)
             self._zoom_out.connect(self.repl._decrease_font_size)
-        self.splitter.addWidget(self.repl)
-        self.splitter.setSizes([66, 33])
+        self.splitter_vertical.addWidget(self.repl)
+        self.splitter_vertical.setSizes([66, 33])
         self.repl.setFocus()
 
     def remove_repl(self):
@@ -579,6 +589,82 @@ class Window(QStackedWidget):
         self.repl.setParent(None)
         self.repl.deleteLater()
         self.repl = None
+
+    def add_webview_left(self, url='http://codewith.mu', size_percent=50):
+        """
+        Adds the left WebView Pane to the application, accepting a given URL
+        and size in percentage unit.
+        """
+        # Set the webview index to be placed left of the tabs pane
+        webview_index = 0
+        tabs_index = self.splitter_horizontal.indexOf(self.tabs)
+        if tabs_index > 0:
+            webview_index = tabs_index - 1
+        self._webview_left = WebViewPane(url=url)
+        self.splitter_horizontal.insertWidget(webview_index, self._webview_left)
+        self.connect_zoom(self._webview_left)
+
+        # Set the split between tabs and left webview to specified percentage
+        tabs_index = self.splitter_horizontal.indexOf(self.tabs)
+        splitter_sizes = self.splitter_horizontal.sizes()
+        total_size = splitter_sizes[webview_index] + splitter_sizes[tabs_index]
+        splitter_sizes[webview_index] = total_size * size_percent // 100
+        splitter_sizes[tabs_index] = total_size - splitter_sizes[webview_index]
+        self.splitter_horizontal.setSizes(splitter_sizes)
+
+    @property
+    def webview_left(self):
+        """
+        Returns the left WebView it if displayed, None otherwise.
+        """
+        try:
+            return self._webview_left
+        except AttributeError:
+            return None
+
+    def remove_webview_left(self):
+        """
+        Removes the left WebView pane from the application.
+        """
+        self._webview_left.setParent(None)
+        self._webview_left.deleteLater()
+        self._webview_left = None
+
+    def add_webview_right(self, url='http://codewith.mu', size_percent=50):
+        """
+        Adds the right WebView Pane to the application, accepting a given URL
+        and size in percentage unit.
+        """
+        self._webview_right = WebViewPane(url=url)
+        self.splitter_horizontal.addWidget(self._webview_right)
+        self.connect_zoom(self._webview_right)
+
+        # Set the split between tabs and right webview to specified percentage
+        tabs_index = self.splitter_horizontal.indexOf(self.tabs)
+        webview_index = self.splitter_horizontal.indexOf(self._webview_right)
+        splitter_sizes = self.splitter_horizontal.sizes()
+        total_size = splitter_sizes[tabs_index] + splitter_sizes[webview_index]
+        splitter_sizes[webview_index] = total_size * size_percent // 100
+        splitter_sizes[tabs_index] = total_size - splitter_sizes[webview_index]
+        self.splitter_horizontal.setSizes(splitter_sizes)
+
+    @property
+    def webview_right(self):
+        """
+        Returns the left WebView it if displayed, None otherwise.
+        """
+        try:
+            return self.webview_right
+        except AttributeError:
+            return None
+
+    def remove_webview_right(self):
+        """
+        Removes the right WebView pane from the application.
+        """
+        self._webview_right.setParent(None)
+        self._webview_right.deleteLater()
+        self._webview_right = None
 
     def set_theme(self, theme):
         """
@@ -696,7 +782,8 @@ class Window(QStackedWidget):
         self.setMinimumSize(800, 600)
 
         self.widget = QWidget()
-        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter_vertical = QSplitter(Qt.Vertical)
+        self.splitter_horizontal = QSplitter(Qt.Horizontal)
 
         widget_layout = QVBoxLayout()
         self.widget.setLayout(widget_layout)
@@ -708,9 +795,11 @@ class Window(QStackedWidget):
         self.tabs.tabCloseRequested.connect(self.tabs.removeTab)
 
         widget_layout.addWidget(self.button_bar)
-        widget_layout.addWidget(self.splitter)
+        widget_layout.addWidget(self.splitter_horizontal)
+        widget_layout.addWidget(self.splitter_vertical)
 
-        self.splitter.addWidget(self.tabs)
+        self.splitter_horizontal.addWidget(self.tabs)
+        self.splitter_vertical.addWidget(self.splitter_horizontal)
 
         self.addWidget(self.widget)
         self.setCurrentWidget(self.widget)
@@ -821,3 +910,39 @@ class REPLPane(QTextEdit):
         Clears the text of the REPL.
         """
         self.setText('')
+
+
+class WebViewPane(QWebView):
+    """
+    This widget represents a Web View/Browser that displays a page.
+    """
+
+    def __init__(self, url='http://codewith.mu', parent=None):
+        super().__init__(parent)
+        self.load(QUrl(url))
+        self.setObjectName('WebViewPane')
+
+    def load_url(self, url):
+        """
+        Navigates the web view to the specified URL.
+        """
+        self.load(QUrl(url))
+
+    def execute_js(self, js_code):
+        return self.page().mainFrame().evaluateJavaScript(js_code)
+
+    def zoomIn(self):
+        """
+        Handles zooming in, increases in deltas of 0.1 up to a factor of +1.0.
+        """
+        new_zoom = self.zoomFactor() + 0.1
+        self.setZoomFactor(new_zoom if (new_zoom < 2.0) else 2.0)
+        self.execute_js('window.dispatchEvent(new Event("resize"));')
+
+    def zoomOut(self):
+        """
+        Handles zooming out, decreases in deltas of 0.1 up to a factor of -0.5.
+        """
+        new_zoom = self.zoomFactor() -0.1
+        self.setZoomFactor(new_zoom if (new_zoom > 0.5) else 0.5)
+        self.execute_js('window.dispatchEvent(new Event("resize"));')
