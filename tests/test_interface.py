@@ -3,10 +3,11 @@
 Tests for the user interface elements of Mu.
 """
 from PyQt5.QtWidgets import (QApplication, QAction, QWidget, QFileDialog,
-                             QMessageBox)
+                             QMessageBox, QLabel, QListWidget)
 from PyQt5.QtCore import QIODevice, Qt, QSize
 from PyQt5.QtGui import QTextCursor, QIcon
 from unittest import mock
+import os
 import mu.interface
 import pytest
 import keyword
@@ -121,7 +122,8 @@ def test_EditorPane_configure():
     values may be. I.e. we're checking that, say, setIndentationWidth is
     called.
     """
-    ep = mu.interface.EditorPane('/foo/bar.py', 'baz')
+    api = ['api help text', ]
+    ep = mu.interface.EditorPane('/foo/bar.py', 'baz', api)
     ep.setFont = mock.MagicMock()
     ep.setUtf8 = mock.MagicMock()
     ep.setAutoIndent = mock.MagicMock()
@@ -135,6 +137,7 @@ def test_EditorPane_configure():
     ep.SendScintilla = mock.MagicMock()
     ep.set_theme = mock.MagicMock()
     ep.configure()
+    assert ep.api == api
     assert ep.setFont.call_count == 1
     assert ep.setUtf8.call_count == 1
     assert ep.setAutoIndent.call_count == 1
@@ -154,12 +157,17 @@ def test_EditorPane_set_theme():
     Check all the expected configuration calls are made to ensure the widget's
     theme is updated.
     """
-    ep = mu.interface.EditorPane('/foo/bar.py', 'baz')
+    api = ['api help text', ]
+    ep = mu.interface.EditorPane('/foo/bar.py', 'baz', api)
     ep.setCaretForegroundColor = mock.MagicMock()
     ep.setMarginsBackgroundColor = mock.MagicMock()
     ep.setMarginsForegroundColor = mock.MagicMock()
     ep.setLexer = mock.MagicMock()
-    ep.set_theme()
+    mock_api = mock.MagicMock()
+    with mock.patch('mu.interface.QsciAPIs', return_value=mock_api) as mapi:
+        ep.set_theme()
+        mapi.assert_called_once_with(ep.lexer)
+        mock_api.add.assert_called_once_with('api help text')
     assert ep.setCaretForegroundColor.call_count == 1
     assert ep.setMarginsBackgroundColor.call_count == 1
     assert ep.setMarginsForegroundColor.call_count == 1
@@ -181,6 +189,112 @@ def test_EditorPane_label():
     assert ep.label == 'bar.py'
     ep.isModified = mock.MagicMock(return_value=True)
     assert ep.label == 'bar.py *'
+
+
+def test_EditorPane_reset_annotations():
+    """
+    Ensure annotation state is reset.
+    """
+    ep = mu.interface.EditorPane(None, 'baz')
+    ep.clearAnnotations = mock.MagicMock()
+    ep.markerDeleteAll = mock.MagicMock()
+    ep.clearIndicatorRange = mock.MagicMock()
+    ep.indicators = {
+        1: 'indicator detail',
+    }
+    ep.reset_annotations()
+    ep.clearAnnotations.assert_called_once_with()
+    ep.markerDeleteAll.assert_called_once_with()
+    ep.clearIndicatorRange.assert_called_once_with(1, 0, 1, 999999,
+                                                   ep.INDICATOR_NUMBER)
+    assert ep.indicators == {}
+
+
+def test_EditorPane_annotate_code():
+    """
+    Given a dict containing representations of feedback on the code contained
+    within the EditorPane instance, ensure the correct indicators and markers
+    are set.
+    """
+    feedback = {
+        16: [{'line_no': 17,
+              'message': 'Syntax error',
+              'source': 'for word, pitch in words\n',
+              'column': 24},
+             {'line_no': 17,
+              'message': 'Too many blank lines (4) above this line',
+              'column': 0,
+              'code': 'E303'}],
+        17: [{'line_no': 18,
+              'message': 'Unexpected indentation',
+              'column': 4,
+              'code': 'E113'}],
+        20: [{'line_no': 21,
+              'message': 'No newline at end of file',
+              'column': 50,
+              'code': 'W292'}]}
+    ep = mu.interface.EditorPane(None, 'baz')
+    ep.indicatorDefine = mock.MagicMock()
+    ep.setIndicatorDrawUnder = mock.MagicMock()
+    ep.markerAdd = mock.MagicMock()
+    ep.fillIndicatorRange = mock.MagicMock()
+    ep.annotate_code(feedback)
+    ep.indicatorDefine.assert_called_once_with(ep.SquiggleIndicator,
+                                               ep.INDICATOR_NUMBER)
+    ep.setIndicatorDrawUnder.assert_called_once_with(True)
+    assert ep.markerAdd.call_count == 3  # once for each affected line.
+    assert ep.fillIndicatorRange.call_count == 3  # once for each message.
+
+
+def test_EditorPane_on_marker_clicked_on():
+    """
+    Ensure the annotation is shown when the marker is clicked.
+    """
+    ep = mu.interface.EditorPane(None, 'baz')
+    ep.indicators = {
+        1: [
+            {'message': 'a message'},
+            {'message': 'another message'},
+        ]
+    }
+    ep.annotation = mock.MagicMock(return_value=None)
+    ep.annotate = mock.MagicMock()
+    ep.get_marker_at_line = mock.MagicMock(return_value=1)
+    line_no = 1
+    ep.on_marker_clicked(1, line_no, None)
+    ep.get_marker_at_line.assert_called_once_with(line_no)
+    ep.annotation.assert_called_once_with(line_no)
+    ep.annotate.assert_called_once_with(line_no, 'a message\nanother message',
+                                        ep.annotationDisplay())
+
+
+def test_EditorPane_on_marker_clicked_off():
+    """
+    Ensure the annotation is removed when the marker is clicked again.
+    """
+    ep = mu.interface.EditorPane(None, 'baz')
+    ep.clearAnnotations = mock.MagicMock()
+    ep.get_marker_at_line = mock.MagicMock(return_value=1)
+    ep.annotation = mock.MagicMock(return_value=1)
+    line_no = 1
+    ep.on_marker_clicked(1, line_no, None)
+    ep.clearAnnotations.assert_called_once_with(line_no)
+
+
+def test_EditorPane_get_marker_at_line():
+    """
+    Given a line with a marker on it, will return the marker_id for it.
+    """
+    ep = mu.interface.EditorPane(None, 'baz')
+    ep.indicators = {
+        1: [
+            {'message': 'a message'},
+            {'message': 'another message'},
+        ]
+    }
+    line_no = 22
+    ep.markerLine = mock.MagicMock(return_value=line_no)
+    assert ep.get_marker_at_line(line_no) == 1
 
 
 def test_ButtonBar_init():
@@ -212,7 +326,7 @@ def test_ButtonBar_init():
         mock_tool_button_size.assert_called_once_with(3)
         mock_context_menu_policy.assert_called_once_with(Qt.PreventContextMenu)
         mock_object_name.assert_called_once_with('StandardToolBar')
-        assert mock_add_action.call_count == 9
+        assert mock_add_action.call_count == 12
         assert mock_add_separator.call_count == 3
 
 
@@ -420,6 +534,7 @@ def test_Window_add_tab():
     w.connect_zoom = mock.MagicMock(return_value=None)
     w.set_theme = mock.MagicMock(return_value=None)
     w.theme = mock.MagicMock()
+    w.api = ['an api help text', ]
     ep = mu.interface.EditorPane('/foo/bar.py', 'baz')
     ep.modificationChanged = mock.MagicMock()
     ep.modificationChanged.connect = mock.MagicMock(return_value=None)
@@ -429,7 +544,7 @@ def test_Window_add_tab():
     text = 'print("Hello, World!")'
     with mock.patch('mu.interface.EditorPane', mock_ed):
         w.add_tab(path, text)
-    mock_ed.assert_called_once_with(path, text)
+    mock_ed.assert_called_once_with(path, text, w.api)
     w.tabs.addTab.assert_called_once_with(ep, ep.label)
     w.tabs.setCurrentIndex.assert_called_once_with(new_tab_index)
     w.connect_zoom.assert_called_once_with(ep)
@@ -485,6 +600,29 @@ def test_Window_modified():
     assert w.modified
 
 
+def test_Window_add_filesystem():
+    """
+    Ensure the expected settings are updated when adding a file system pane.
+    """
+    w = mu.interface.Window()
+    w.theme = mock.MagicMock()
+    w.splitter = mock.MagicMock()
+    w.splitter.addWidget = mock.MagicMock(return_value=None)
+    w.splitter.setSizes = mock.MagicMock(return_value=None)
+    w.connect_zoom = mock.MagicMock(return_value=None)
+    mock_fs = mock.MagicMock()
+    mock_fs.setFocus = mock.MagicMock(return_value=None)
+    mock_fs_class = mock.MagicMock(return_value=mock_fs)
+    with mock.patch('mu.interface.FileSystemPane', mock_fs_class):
+        w.add_filesystem('path/to/home')
+    mock_fs_class.assert_called_once_with(w.splitter, 'path/to/home')
+    assert w.fs == mock_fs
+    w.splitter.addWidget.assert_called_once_with(mock_fs)
+    w.splitter.setSizes.assert_called_once_with([66, 33])
+    mock_fs.setFocus.assert_called_once_with()
+    w.connect_zoom.assert_called_once_with(mock_fs)
+
+
 def test_Window_add_repl():
     """
     Ensure the expected settings are updated.
@@ -511,6 +649,22 @@ def test_Window_add_repl():
     w.connect_zoom.assert_called_once_with(mock_repl)
 
 
+def test_Window_remove_filesystem():
+    """
+    Check all the necessary calls to remove / reset the file system pane are
+    made.
+    """
+    w = mu.interface.Window()
+    mock_fs = mock.MagicMock()
+    mock_fs.setParent = mock.MagicMock(return_value=None)
+    mock_fs.deleteLater = mock.MagicMock(return_value=None)
+    w.fs = mock_fs
+    w.remove_filesystem()
+    mock_fs.setParent.assert_called_once_with(None)
+    mock_fs.deleteLater.assert_called_once_with()
+    assert w.fs is None
+
+
 def test_Window_remove_repl():
     """
     Check all the necessary calls to remove / reset the REPL are made.
@@ -524,7 +678,6 @@ def test_Window_remove_repl():
     mock_repl.setParent.assert_called_once_with(None)
     mock_repl.deleteLater.assert_called_once_with()
     assert w.repl is None
-    w = mu.interface.Window()
 
 
 def test_Window_set_theme():
@@ -711,6 +864,31 @@ def test_Window_autosize_window():
     w.move.assert_called_once_with(x, y)
 
 
+def test_Window_reset_annotations():
+    """
+    Ensure the current tab has its annotations reset.
+    """
+    tab = mock.MagicMock()
+    w = mu.interface.Window()
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget = mock.MagicMock(return_value=tab)
+    w.reset_annotations()
+    tab.reset_annotations.assert_called_once_with()
+
+
+def test_Window_annotate_code():
+    """
+    Ensure the current tab is annotated with the passed in feedback.
+    """
+    tab = mock.MagicMock()
+    w = mu.interface.Window()
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget = mock.MagicMock(return_value=tab)
+    feedback = 'foo'
+    w.annotate_code(feedback)
+    tab.annotate_code.assert_called_once_with(feedback)
+
+
 def test_Window_setup():
     """
     Ensures the various default attributes of the window are set to the
@@ -743,17 +921,19 @@ def test_Window_setup():
     mock_qtw.removeTab = mock.MagicMock
     mock_qtw_class = mock.MagicMock(return_value=mock_qtw)
     theme = 'night'
+    api = ['some api docs', ]
     with mock.patch('mu.interface.QWidget', mock_widget_class), \
             mock.patch('mu.interface.QSplitter', mock_splitter_class), \
             mock.patch('mu.interface.QVBoxLayout', mock_layout_class), \
             mock.patch('mu.interface.ButtonBar', mock_button_bar_class), \
             mock.patch('mu.interface.FileTabs', mock_qtw_class):
-        w.setup(theme)
+        w.setup(theme, api)
     assert w.theme == theme
+    assert w.api == api
     assert w.setWindowIcon.call_count == 1
     assert isinstance(w.setWindowIcon.call_args[0][0], QIcon)
     w.update_title.assert_called_once_with()
-    w.setMinimumSize.assert_called_once_with(800, 600)
+    w.setMinimumSize.assert_called_once_with(926, 600)
     assert w.widget == mock_widget
     assert w.splitter == mock_splitter
     w.widget.setLayout.assert_called_once_with(mock_layout)
@@ -1036,3 +1216,376 @@ def test_REPLPane_clear():
         rp.setText = mock.MagicMock(return_value=None)
         rp.clear()
         rp.setText.assert_called_once_with('')
+
+
+def test_MuFileList_disable():
+    """
+    Disable and block drops on the current and sibling MuFileList.
+    """
+    mock_sibling = mock.MagicMock()
+    mfl = mu.interface.MuFileList()
+    mfl.setDisabled = mock.MagicMock(return_value=True)
+    mfl.setAcceptDrops = mock.MagicMock(return_value=True)
+    mfl.disable(mock_sibling)
+    mfl.setDisabled.assert_called_once_with(True)
+    mock_sibling.setDisabled.assert_called_once_with(True)
+    mfl.setAcceptDrops.assert_called_once_with(False)
+    mock_sibling.setAcceptDrops.assert_called_once_with(False)
+
+
+def test_MuFileList_enable():
+    """
+    Allow drops and interactions with current and sibling MuFileList.
+    """
+    mock_sibling = mock.MagicMock()
+    mfl = mu.interface.MuFileList()
+    mfl.setDisabled = mock.MagicMock(return_value=True)
+    mfl.setAcceptDrops = mock.MagicMock(return_value=True)
+    mfl.enable(mock_sibling)
+    mfl.setDisabled.assert_called_once_with(False)
+    mock_sibling.setDisabled.assert_called_once_with(False)
+    mfl.setAcceptDrops.assert_called_once_with(True)
+    mock_sibling.setAcceptDrops.assert_called_once_with(True)
+
+
+def test_MicrobitFileList_init():
+    """
+    Check the widget references the user's home and allows drag and drop.
+    """
+    mfs = mu.interface.MicrobitFileList('home/path')
+    assert mfs.home == 'home/path'
+    assert mfs.dragDropMode() == mfs.DragDrop
+
+
+def test_MicrobitFileList_dropEvent():
+    """
+    Ensure a valid drop event is handled as expected.
+    """
+    mock_event = mock.MagicMock()
+    source = mu.interface.LocalFileList('homepath')
+    mock_item = mock.MagicMock()
+    mock_item.text.return_value = 'foo.py'
+    source.currentItem = mock.MagicMock(return_value=mock_item)
+    mock_event.source.return_value = source
+    mock_context = mock.MagicMock()
+    mock_serial = mock.MagicMock()
+    mock_serial.port = 'COM0'
+    mock_context.__enter__.return_value = mock_serial
+    mfs = mu.interface.MicrobitFileList('homepath')
+    mfs.disable = mock.MagicMock()
+    mfs.enable = mock.MagicMock()
+    with mock.patch('mu.interface.microfs.get_serial',
+                    return_value=mock_context), \
+            mock.patch('mu.interface.MuFileList.dropEvent',
+                       return_value=None) as mock_dropEvent, \
+            mock.patch('mu.interface.microfs.put',
+                       return_value=True) as mock_put:
+        mfs.dropEvent(mock_event)
+        mfs.disable.assert_called_once_with(source)
+        home = os.path.join('homepath', 'foo.py')
+        mock_put.assert_called_once_with(mock_serial, home)
+        mock_dropEvent.assert_called_once_with(mock_event)
+        mfs.enable.assert_called_once_with(source)
+
+
+def test_MicrobitFileList_dropEvent_error():
+    """
+    Ensure that if an error occurs there is no change in the file list state.
+    """
+    mock_event = mock.MagicMock()
+    source = mu.interface.LocalFileList('homepath')
+    mock_item = mock.MagicMock()
+    mock_item.text.return_value = 'foo.py'
+    source.currentItem = mock.MagicMock(return_value=mock_item)
+    mock_event.source.return_value = source
+    mock_context = mock.MagicMock()
+    mock_serial = mock.MagicMock()
+    mock_serial.port = 'COM0'
+    mock_context.__enter__.return_value = mock_serial
+    mfs = mu.interface.MicrobitFileList('homepath')
+    mfs.disable = mock.MagicMock()
+    mfs.enable = mock.MagicMock()
+    ex = IOError('BANG')
+    with mock.patch('mu.interface.microfs.get_serial',
+                    return_value=mock_context), \
+            mock.patch('mu.interface.microfs.put', side_effect=ex), \
+            mock.patch('mu.interface.logger.error', return_value=None) as l:
+        mfs.dropEvent(mock_event)
+        l.assert_called_once_with(ex)
+        mfs.disable.assert_called_once_with(source)
+        mfs.enable.assert_called_once_with(source)
+
+
+def test_MicrobitFileList_dropEvent_wrong_source():
+    """
+    Ensure that only drop events whose origins are LocalFileList objects are
+    handled.
+    """
+    mock_event = mock.MagicMock()
+    source = mock.MagicMock()
+    mock_event.source.return_value = source
+    mfs = mu.interface.MicrobitFileList('homepath')
+    mfs.disable = mock.MagicMock()
+    mfs.enable = mock.MagicMock()
+    with mock.patch('mu.interface.microfs.put', return_value=None) as mp:
+        mfs.dropEvent(mock_event)
+        assert mp.call_count == 0
+    mfs.disable.assert_called_once_with(source)
+    mfs.enable.assert_called_once_with(source)
+
+
+def test_MicrobitFileList_contextMenuEvent():
+    """
+    Ensure that the menu displayed when a file on the micro:bit is
+    right-clicked works as expected when activated.
+    """
+    mock_menu = mock.MagicMock()
+    mock_action = mock.MagicMock()
+    mock_menu.addAction.return_value = mock_action
+    mock_menu.exec_.return_value = mock_action
+    mfs = mu.interface.MicrobitFileList('homepath')
+    mock_current = mock.MagicMock()
+    mock_current.text.return_value = 'foo.py'
+    mfs.currentItem = mock.MagicMock(return_value=mock_current)
+    mfs.mapToGlobal = mock.MagicMock(return_value=None)
+    mfs.setDisabled = mock.MagicMock(return_value=None)
+    mfs.setAcceptDrops = mock.MagicMock(return_value=None)
+    mock_context = mock.MagicMock()
+    mock_serial = mock.MagicMock()
+    mock_serial.port = 'COM0'
+    mock_context.__enter__.return_value = mock_serial
+    mock_event = mock.MagicMock()
+    with mock.patch('mu.interface.microfs.get_serial',
+                    return_value=mock_context), \
+            mock.patch('mu.interface.microfs.rm',
+                       return_value=None) as mock_rm, \
+            mock.patch('mu.interface.QMenu', return_value=mock_menu):
+        mfs.contextMenuEvent(mock_event)
+        mock_rm.assert_called_once_with(mock_serial, 'foo.py')
+        assert mfs.setDisabled.call_count == 2
+        assert mfs.setAcceptDrops.call_count == 2
+
+
+def test_MicrobitFileList_contextMenuEvent_error():
+    """
+    Ensure that if there's an error while preparing for the rm operation that
+    it aborts without enacting.
+    """
+    mock_menu = mock.MagicMock()
+    mock_action = mock.MagicMock()
+    mock_menu.addAction.return_value = mock_action
+    mock_menu.exec_.return_value = mock_action
+    mfs = mu.interface.MicrobitFileList('homepath')
+    mock_current = mock.MagicMock()
+    mock_current.text.return_value = 'foo.py'
+    mfs.currentItem = mock.MagicMock(return_value=mock_current)
+    mfs.mapToGlobal = mock.MagicMock(return_value=None)
+    mfs.setDisabled = mock.MagicMock(return_value=None)
+    mfs.setAcceptDrops = mock.MagicMock(return_value=None)
+    mfs.takeItem = mock.MagicMock(return_value=None)
+    mock_context = mock.MagicMock()
+    mock_serial = mock.MagicMock()
+    mock_serial.port = 'COM0'
+    mock_context.__enter__.return_value = mock_serial
+    mock_event = mock.MagicMock()
+    ex = IOError('BANG')
+    with mock.patch('mu.interface.microfs.get_serial',
+                    return_value=mock_context), \
+            mock.patch('mu.interface.microfs.rm', side_effect=ex), \
+            mock.patch('mu.interface.logger.error', return_value=None) as l, \
+            mock.patch('mu.interface.QMenu', return_value=mock_menu):
+        mfs.contextMenuEvent(mock_event)
+        l.assert_called_once_with(ex)
+        assert mfs.takeItem.call_count == 0
+        assert mfs.setDisabled.call_count == 2
+        assert mfs.setAcceptDrops.call_count == 2
+
+
+def test_LocalFileList_init():
+    """
+    Ensure the class instantiates with the expected state.
+    """
+    lfl = mu.interface.LocalFileList('home/path')
+    assert lfl.home == 'home/path'
+    assert lfl.dragDropMode() == lfl.DragDrop
+
+
+def test_LocalFileList_dropEvent():
+    """
+    Ensure a valid drop event is handled as expected.
+    """
+    mock_event = mock.MagicMock()
+    source = mu.interface.MicrobitFileList('homepath')
+    mock_item = mock.MagicMock()
+    mock_item.text.return_value = 'foo.py'
+    source.currentItem = mock.MagicMock(return_value=mock_item)
+    mock_event.source.return_value = source
+    mock_context = mock.MagicMock()
+    mock_serial = mock.MagicMock()
+    mock_serial.port = 'COM0'
+    mock_context.__enter__.return_value = mock_serial
+    lfs = mu.interface.LocalFileList('homepath')
+    lfs.disable = mock.MagicMock()
+    lfs.enable = mock.MagicMock()
+    with mock.patch('mu.interface.microfs.get_serial',
+                    return_value=mock_context), \
+            mock.patch('mu.interface.MuFileList.dropEvent',
+                       return_value=None) as mock_dropEvent, \
+            mock.patch('mu.interface.microfs.get',
+                       return_value=True) as mock_get:
+        lfs.dropEvent(mock_event)
+        lfs.disable.assert_called_once_with(source)
+        home = os.path.join('homepath', 'foo.py')
+        mock_get.assert_called_once_with(mock_serial, 'foo.py', home)
+        mock_dropEvent.assert_called_once_with(mock_event)
+        lfs.enable.assert_called_once_with(source)
+
+
+def test_LocalFileList_dropEvent_error():
+    """
+    Ensure that if an error occurs there is no change in the file list state.
+    """
+    mock_event = mock.MagicMock()
+    source = mu.interface.MicrobitFileList('homepath')
+    mock_item = mock.MagicMock()
+    mock_item.text.return_value = 'foo.py'
+    source.currentItem = mock.MagicMock(return_value=mock_item)
+    mock_event.source.return_value = source
+    mock_context = mock.MagicMock()
+    mock_serial = mock.MagicMock()
+    mock_serial.port = 'COM0'
+    mock_context.__enter__.return_value = mock_serial
+    lfs = mu.interface.LocalFileList('homepath')
+    lfs.disable = mock.MagicMock()
+    lfs.enable = mock.MagicMock()
+    ex = IOError('BANG')
+    with mock.patch('mu.interface.microfs.get_serial',
+                    return_value=mock_context), \
+            mock.patch('mu.interface.microfs.get', side_effect=ex), \
+            mock.patch('mu.interface.logger.error', return_value=None) as l:
+        lfs.dropEvent(mock_event)
+        l.assert_called_once_with(ex)
+        lfs.disable.assert_called_once_with(source)
+        lfs.enable.assert_called_once_with(source)
+
+
+def test_LocalFileList_dropEvent_wrong_source():
+    """
+    Ensure that only drop events whose origins are LocalFileList objects are
+    handled.
+    """
+    mock_event = mock.MagicMock()
+    source = mock.MagicMock()
+    mock_event.source.return_value = source
+    lfs = mu.interface.LocalFileList('homepath')
+    lfs.disable = mock.MagicMock()
+    lfs.enable = mock.MagicMock()
+    with mock.patch('mu.interface.microfs.put', return_value=None) as mp:
+        lfs.dropEvent(mock_event)
+        assert mp.call_count == 0
+    lfs.disable.assert_called_once_with(source)
+    lfs.enable.assert_called_once_with(source)
+
+
+def test_FileSystemPane_init():
+    """
+    Check things are set up as expected.
+    """
+    with mock.patch('mu.interface.FileSystemPane.ls',
+                    return_value=None) as mock_ls:
+        fsp = mu.interface.FileSystemPane(None, 'homepath')
+    mock_ls.assert_called_once_with()
+    assert isinstance(fsp.microbit_label, QLabel)
+    assert isinstance(fsp.local_label, QLabel)
+    assert isinstance(fsp.microbit_fs, QListWidget)
+    assert isinstance(fsp.local_fs, QListWidget)
+
+
+def test_FileSystemPane_ls():
+    """
+    Ensure the ls method works as expected.
+    """
+    microbit_files = ['foo.py', 'bar.py', 'baz.py']
+    local_files = ['spam.py', 'eggs.py']
+    # MOCK ALL TEH THIGNS!
+    with mock.patch('mu.interface.MicrobitFileList.clear',
+                    return_value=None) as mfs_clear, \
+            mock.patch('mu.interface.LocalFileList.clear',
+                       return_value=None) as lfs_clear, \
+            mock.patch('mu.interface.microfs.ls',
+                       return_value=microbit_files), \
+            mock.patch('mu.interface.microfs.get_serial', return_value=None), \
+            mock.patch('mu.interface.os.listdir', return_value=local_files), \
+            mock.patch('mu.interface.os.path.isfile', return_value=True), \
+            mock.patch('mu.interface.os.path.join', return_value=None):
+        fsp = mu.interface.FileSystemPane(None, 'homepath')
+        mfs_clear.assert_called_once_with()
+        lfs_clear.assert_called_once_with()
+        assert fsp.microbit_fs.count() == 3
+        assert fsp.local_fs.count() == 2
+
+
+def test_FileSystemPane_set_theme_day():
+    """
+    Ensures the day theme is set.
+    """
+    with mock.patch('mu.interface.FileSystemPane.ls', return_value=None):
+        fsp = mu.interface.FileSystemPane(None, 'homepath')
+    fsp.setStyleSheet = mock.MagicMock()
+    fsp.set_theme('day')
+    fsp.setStyleSheet.assert_called_once_with(mu.interface.DAY_STYLE)
+
+
+def test_FileSystemPane_set_theme_night():
+    """
+    Ensures the night theme is set.
+    """
+    with mock.patch('mu.interface.FileSystemPane.ls', return_value=None):
+        fsp = mu.interface.FileSystemPane(None, 'homepath')
+    fsp.setStyleSheet = mock.MagicMock()
+    fsp.set_theme('night')
+    fsp.setStyleSheet.assert_called_once_with(mu.interface.NIGHT_STYLE)
+
+
+def test_FileSystemPane_set_font_size():
+    """
+    Ensure the right size is set as the point size and the text based UI child
+    widgets are updated.
+    """
+    with mock.patch('mu.interface.FileSystemPane.ls', return_value=None):
+        fsp = mu.interface.FileSystemPane(None, 'homepath')
+    fsp.font = mock.MagicMock()
+    fsp.microbit_label = mock.MagicMock()
+    fsp.local_label = mock.MagicMock()
+    fsp.microbit_fs = mock.MagicMock()
+    fsp.local_fs = mock.MagicMock()
+    fsp.set_font_size(22)
+    fsp.font.setPointSize.assert_called_once_with(22)
+    fsp.microbit_label.setFont.assert_called_once_with(fsp.font)
+    fsp.local_label.setFont.assert_called_once_with(fsp.font)
+    fsp.microbit_fs.setFont.assert_called_once_with(fsp.font)
+    fsp.local_fs.setFont.assert_called_once_with(fsp.font)
+
+
+def test_FileSystemPane_zoom_in():
+    """
+    Ensure the font is re-set bigger when zooming in.
+    """
+    with mock.patch('mu.interface.FileSystemPane.ls', return_value=None):
+        fsp = mu.interface.FileSystemPane(None, 'homepath')
+    fsp.set_font_size = mock.MagicMock()
+    fsp.zoomIn()
+    expected = mu.interface.DEFAULT_FONT_SIZE + 2
+    fsp.set_font_size.assert_called_once_with(expected)
+
+
+def test_FileSystemPane_zoom_out():
+    """
+    Ensure the font is re-set smaller when zooming out.
+    """
+    with mock.patch('mu.interface.FileSystemPane.ls', return_value=None):
+        fsp = mu.interface.FileSystemPane(None, 'homepath')
+    fsp.set_font_size = mock.MagicMock()
+    fsp.zoomOut()
+    expected = mu.interface.DEFAULT_FONT_SIZE - 2
+    fsp.set_font_size.assert_called_once_with(expected)

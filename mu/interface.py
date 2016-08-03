@@ -23,11 +23,14 @@ import logging
 from PyQt5.QtCore import QSize, Qt, pyqtSignal, QIODevice
 from PyQt5.QtWidgets import (QToolBar, QAction, QStackedWidget, QDesktopWidget,
                              QWidget, QVBoxLayout, QShortcut, QSplitter,
-                             QTabWidget, QFileDialog, QMessageBox, QTextEdit)
+                             QTabWidget, QFileDialog, QMessageBox, QTextEdit,
+                             QFrame, QListWidget, QGridLayout, QLabel, QMenu)
 from PyQt5.QtGui import QKeySequence, QColor, QTextCursor, QFontDatabase
-from PyQt5.Qsci import QsciScintilla, QsciLexerPython
+from PyQt5.Qsci import QsciScintilla, QsciLexerPython, QsciAPIs
 from PyQt5.QtSerialPort import QSerialPort
+from mu.contrib import microfs
 from mu.resources import load_icon, load_stylesheet, load_font_data
+
 
 #: The default font size.
 DEFAULT_FONT_SIZE = 14
@@ -137,6 +140,7 @@ class DayTheme(Theme):
     Paper = QColor('white')
     Caret = QColor('black')
     Margin = QColor('#EEE')
+    Indicator = QColor('red')
 
 
 class NightTheme(Theme):
@@ -162,6 +166,7 @@ class NightTheme(Theme):
     Paper = QColor('black')
     Caret = QColor('white')
     Margin = QColor('#333')
+    Indicator = QColor('white')
 
 
 class PythonLexer(QsciLexerPython):
@@ -192,10 +197,14 @@ class EditorPane(QsciScintilla):
     Represents the text editor.
     """
 
-    def __init__(self, path, text):
+    def __init__(self, path, text, api=None):
         super().__init__()
         self.path = path
         self.setText(text)
+        self.indicators = {}
+        self.INDICATOR_NUMBER = 19  # arbitrary
+        self.MARKER_NUMBER = 22  # also arbitrary
+        self.api = api if api else []
         self.setModified(False)
         self.configure()
 
@@ -219,6 +228,10 @@ class EditorPane(QsciScintilla):
         self.setBraceMatching(QsciScintilla.SloppyBraceMatch)
         self.SendScintilla(QsciScintilla.SCI_SETHSCROLLBAR, 0)
         self.set_theme()
+        self.markerDefine(self.RightArrow, self.MARKER_NUMBER)
+        self.setMarginSensitivity(1, True)
+        self.marginClicked.connect(self.on_marker_clicked)
+        self.setAnnotationDisplay(self.AnnotationBoxed)
 
     def set_theme(self, theme=DayTheme):
         """
@@ -231,6 +244,16 @@ class EditorPane(QsciScintilla):
         self.setCaretForegroundColor(theme.Caret)
         self.setMarginsBackgroundColor(theme.Margin)
         self.setMarginsForegroundColor(theme.Caret)
+        self.setIndicatorForegroundColor(theme.Indicator)
+        self.setMarkerBackgroundColor(theme.Indicator, self.MARKER_NUMBER)
+
+        api = QsciAPIs(self.lexer)
+        for entry in self.api:
+            api.add(entry)
+        api.prepare()
+        self.setAutoCompletionThreshold(2)
+        self.setAutoCompletionSource(QsciScintilla.AcsAll)
+
         self.setLexer(self.lexer)
 
     @property
@@ -251,6 +274,65 @@ class EditorPane(QsciScintilla):
             return label + ' *'
         else:
             return label
+
+    def reset_annotations(self):
+        """
+        Clears all the assets (indicators, annotations and markers) associated
+        with last code check.
+        """
+        self.clearAnnotations()
+        self.markerDeleteAll()
+        for line_no in self.indicators:
+            self.clearIndicatorRange(line_no, 0, line_no, 999999,
+                                     self.INDICATOR_NUMBER)
+        self.indicators = {}
+
+    def annotate_code(self, feedback):
+        """
+        Given a list of annotations add them to the editor pane so the user
+        can act upon them.
+        """
+        self.indicatorDefine(self.SquiggleIndicator, self.INDICATOR_NUMBER)
+        self.setIndicatorDrawUnder(True)
+        for line_no, messages in feedback.items():
+            marker_id = self.markerAdd(line_no, self.MARKER_NUMBER)
+            col_start = 0
+            col_end = 0
+            self.indicators[marker_id] = messages
+            for message in messages:
+                col = message.get('column', 0)
+                if col:
+                    col_start = col - 1
+                    col_end = col + 1
+                    self.fillIndicatorRange(line_no, col_start, line_no,
+                                            col_end, self.INDICATOR_NUMBER)
+
+    def on_marker_clicked(self, margin, line, state):
+        """
+        Display something when the margin indicator is clicked.
+        """
+        marker_id = self.get_marker_at_line(line)
+        if marker_id:
+            if self.annotation(line):
+                self.clearAnnotations(line)
+            else:
+                messages = [i['message'] for i in
+                            self.indicators.get(marker_id, [])]
+                text = '\n'.join(messages).strip()
+                if text:
+                    self.annotate(line, text, self.annotationDisplay())
+
+    def get_marker_at_line(self, line):
+        """
+        Given a line, will return the marker if one exists. Otherwise, returns
+        None.
+
+        Required because the built in markersAtLine method is useless, misnamed
+        and doesn't return anything useful. :-(
+        """
+        for marker_id in self.indicators:
+            if self.markerLine(marker_id) == line:
+                return marker_id
 
 
 class ButtonBar(QToolBar):
@@ -277,6 +359,8 @@ class ButtonBar(QToolBar):
         self.addSeparator()
         self.addAction(name="flash",
                        tool_text="Flash your code onto the micro:bit.")
+        self.addAction(name="files",
+                       tool_text="Access the file system on the micro:bit.")
         self.addAction(name="repl",
                        tool_text="Use the REPL to live code the micro:bit.")
         self.addSeparator()
@@ -287,7 +371,11 @@ class ButtonBar(QToolBar):
         self.addAction(name="theme",
                        tool_text="Change theme between day or night.")
         self.addSeparator()
-        self.addAction(name="quit", tool_text="Quit the application.")
+        self.addAction(name="check",
+                       tool_text="Check your code for mistakes.")
+        self.addAction(name="help",
+                       tool_text="Show help about Mu in a browser.")
+        self.addAction(name="quit", tool_text="Quit Mu.")
 
     def addAction(self, name, tool_text):
         """
@@ -295,7 +383,7 @@ class ButtonBar(QToolBar):
         widget's slots.
         """
         action = QAction(load_icon(name), name.capitalize(), self,
-                         statusTip=tool_text)
+                         toolTip=tool_text)
         super().addAction(action)
         self.slots[name] = action
 
@@ -406,7 +494,7 @@ class Window(QStackedWidget):
         """
         Adds a tab with the referenced path and text to the editor.
         """
-        new_tab = EditorPane(path, text)
+        new_tab = EditorPane(path, text, self.api)
         new_tab_index = self.tabs.addTab(new_tab, new_tab.label)
 
         @new_tab.modificationChanged.connect
@@ -444,6 +532,16 @@ class Window(QStackedWidget):
                 return True
         return False
 
+    def add_filesystem(self, home):
+        """
+        Adds the file system pane to the application.
+        """
+        self.fs = FileSystemPane(self.splitter, home)
+        self.splitter.addWidget(self.fs)
+        self.splitter.setSizes([66, 33])
+        self.fs.setFocus()
+        self.connect_zoom(self.fs)
+
     def add_repl(self, repl):
         """
         Adds the REPL pane to the application.
@@ -453,6 +551,14 @@ class Window(QStackedWidget):
         self.splitter.setSizes([66, 33])
         self.repl.setFocus()
         self.connect_zoom(self.repl)
+
+    def remove_filesystem(self):
+        """
+        Removes the file system pane from the application.
+        """
+        self.fs.setParent(None)
+        self.fs.deleteLater()
+        self.fs = None
 
     def remove_repl(self):
         """
@@ -556,7 +662,21 @@ class Window(QStackedWidget):
         self.move((screen.width() - size.width()) / 2,
                   (screen.height() - size.height()) / 2)
 
-    def setup(self, theme):
+    def reset_annotations(self):
+        """
+        Resets the state of annotations on the current tab.
+        """
+        self.current_tab.reset_annotations()
+
+    def annotate_code(self, feedback):
+        """
+        Given a list of annotations about the code in the current tab, add
+        the annotations to the editor window so the user can make appropriate
+        changes.
+        """
+        self.current_tab.annotate_code(feedback)
+
+    def setup(self, theme, api=None):
         """
         Sets up the window.
 
@@ -564,10 +684,11 @@ class Window(QStackedWidget):
         interface is laid out.
         """
         self.theme = theme
+        self.api = api if api else []
         # Give the window a default icon, title and minimum size.
         self.setWindowIcon(load_icon(self.icon))
         self.update_title()
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(926, 600)
 
         self.widget = QWidget()
         self.splitter = QSplitter(Qt.Vertical)
@@ -691,3 +812,186 @@ class REPLPane(QTextEdit):
         Clears the text of the REPL.
         """
         self.setText('')
+
+
+class MuFileList(QListWidget):
+    """
+    Contains shared methods for the two types of file listing used in Mu.
+    """
+    def disable(self, sibling):
+        """
+        Stops interaction with the list widgets.
+        """
+        self.setDisabled(True)
+        sibling.setDisabled(True)
+        self.setAcceptDrops(False)
+        sibling.setAcceptDrops(False)
+
+    def enable(self, sibling):
+        """
+        Allows interaction with the list widgets.
+        """
+        self.setDisabled(False)
+        sibling.setDisabled(False)
+        self.setAcceptDrops(True)
+        sibling.setAcceptDrops(True)
+
+
+class MicrobitFileList(MuFileList):
+    """
+    Represents a list of files on the micro:bit.
+    """
+
+    def __init__(self, home):
+        super().__init__()
+        self.home = home
+        self.setDragDropMode(QListWidget.DragDrop)
+
+    def dropEvent(self, event):
+        source = event.source()
+        self.disable(source)
+        if isinstance(source, LocalFileList):
+            local_filename = os.path.join(self.home,
+                                          source.currentItem().text())
+            logger.info("Putting {}".format(local_filename))
+            try:
+                with microfs.get_serial() as serial:
+                    logger.info(serial.port)
+                    microfs.put(serial, local_filename)
+                super().dropEvent(event)
+            except Exception as ex:
+                logger.error(ex)
+        self.enable(source)
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        delete_action = menu.addAction("Delete (cannot be undone)")
+        action = menu.exec_(self.mapToGlobal(event.pos()))
+        if action == delete_action:
+            self.setDisabled(True)
+            self.setAcceptDrops(False)
+            microbit_filename = self.currentItem().text()
+            logger.info("Deleting {}".format(microbit_filename))
+            try:
+                with microfs.get_serial() as serial:
+                    logger.info(serial.port)
+                    microfs.rm(serial, microbit_filename)
+                self.takeItem(self.currentRow())
+            except Exception as ex:
+                logger.error(ex)
+            self.setDisabled(False)
+            self.setAcceptDrops(True)
+
+
+class LocalFileList(MuFileList):
+    """
+    Represents a list of files in the Mu directory on the local machine.
+    """
+
+    def __init__(self, home):
+        super().__init__()
+        self.home = home
+        self.setDragDropMode(QListWidget.DragDrop)
+
+    def dropEvent(self, event):
+        source = event.source()
+        self.disable(source)
+        if isinstance(source, MicrobitFileList):
+            microbit_filename = source.currentItem().text()
+            local_filename = os.path.join(self.home,
+                                          microbit_filename)
+            logger.debug("Getting {} to {}".format(microbit_filename,
+                                                   local_filename))
+            try:
+                with microfs.get_serial() as serial:
+                    logger.info(serial.port)
+                    microfs.get(serial, microbit_filename, local_filename)
+                super().dropEvent(event)
+            except Exception as ex:
+                logger.error(ex)
+        self.enable(source)
+
+
+class FileSystemPane(QFrame):
+    """
+    Contains two QListWidgets representing the micro:bit and the user's code
+    directory. Users transfer files by dragging and dropping. Highlighted files
+    can be selected for deletion.
+    """
+
+    def __init__(self, parent, home):
+        super().__init__(parent)
+        self.home = home
+        self.font = Font().load()
+        microbit_fs = MicrobitFileList(home)
+        local_fs = LocalFileList(home)
+        layout = QGridLayout()
+        self.setLayout(layout)
+        microbit_label = QLabel()
+        microbit_label.setText('Files on your micro:bit:')
+        local_label = QLabel()
+        local_label.setText('Files on your computer:')
+        self.microbit_label = microbit_label
+        self.local_label = local_label
+        self.microbit_fs = microbit_fs
+        self.local_fs = local_fs
+        self.set_font_size()
+        layout.addWidget(microbit_label, 0, 0)
+        layout.addWidget(local_label, 0, 1)
+        layout.addWidget(microbit_fs, 1, 0)
+        layout.addWidget(local_fs, 1, 1)
+        self.ls()
+
+    def ls(self):
+        """
+        Gets a list of the files on the micro:bit.
+
+        Naive implementation for simplicity's sake.
+        """
+        self.microbit_fs.clear()
+        self.local_fs.clear()
+        microbit_files = microfs.ls(microfs.get_serial())
+        for f in microbit_files:
+            self.microbit_fs.addItem(f)
+        local_files = [f for f in os.listdir(self.home)
+                       if os.path.isfile(os.path.join(self.home, f))]
+        local_files.sort()
+        for f in local_files:
+            self.local_fs.addItem(f)
+
+    def set_theme(self, theme):
+        """
+        Sets the theme / look for the FileSystemPane.
+        """
+        if theme == 'day':
+            self.setStyleSheet(DAY_STYLE)
+        else:
+            self.setStyleSheet(NIGHT_STYLE)
+
+    def set_font_size(self, new_size=DEFAULT_FONT_SIZE):
+        """
+        Sets the font size for all the textual elements in this pane.
+        """
+        self.font.setPointSize(new_size)
+        self.microbit_label.setFont(self.font)
+        self.local_label.setFont(self.font)
+        self.microbit_fs.setFont(self.font)
+        self.local_fs.setFont(self.font)
+
+    def zoomIn(self, delta=2):
+        """
+        Zoom in (increase) the size of the font by delta amount difference in
+        point size upto 34 points.
+        """
+        old_size = self.font.pointSize()
+        new_size = min(old_size + delta, 34)
+        self.set_font_size(new_size)
+
+    def zoomOut(self, delta=2):
+        """
+        Zoom out (decrease) the size of the font by delta amount difference in
+        point size down to 4 points.
+        """
+        old_size = self.font.pointSize()
+        new_size = max(old_size - delta, 4)
+        self.set_font_size(new_size)

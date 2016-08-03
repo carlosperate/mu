@@ -27,6 +27,7 @@ from mu import __version__
 from mu.logic import Editor, LOG_FILE, LOG_DIR
 from mu.interface import Window
 from mu.resources import load_pixmap
+from mu.resources.api import MICROPYTHON_APIS
 
 
 def setup_logging():
@@ -59,7 +60,7 @@ def run():
     editor = Editor(view=editor_window)
     # Setup the window.
     editor_window.closeEvent = editor.quit
-    editor_window.setup(editor.theme)
+    editor_window.setup(editor.theme, MICROPYTHON_APIS)
     editor.restore_session()
     # Connect the various buttons in the window to the editor.
     button_bar = editor_window.button_bar
@@ -67,10 +68,13 @@ def run():
     button_bar.connect("load", editor.load, "Ctrl+O")
     button_bar.connect("save", editor.save, "Ctrl+S")
     button_bar.connect("flash", editor.flash)
+    button_bar.connect("files", editor.toggle_fs)
     button_bar.connect("repl", editor.toggle_repl)
     button_bar.connect("zoom-in", editor.zoom_in)
     button_bar.connect("zoom-out", editor.zoom_out)
     button_bar.connect("theme", editor.toggle_theme)
+    button_bar.connect("check", editor.check_code)
+    button_bar.connect("help", editor.show_help)
     button_bar.connect("quit", editor.quit)
     # Finished starting up the application, so hide the splash icon.
     splash.finish(editor_window)

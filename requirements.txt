@@ -1,7 +1,8 @@
 pytest
-pep8
+pycodestyle
 pyflakes
 coverage
 sphinx
 pytest-cov
+pyserial
 setuptools==19.2
