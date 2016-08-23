@@ -84,13 +84,18 @@ def find_microbit():
 def check_flake(filename, code):
     """
     Given a filename and some code to be checked, uses the PyFlakesmodule to
-    return a list of items describing issues of code quality. See:
+    return a dictionary describing issues of code quality per line. See:
 
     https://github.com/PyCQA/pyflakes
     """
     reporter = MuFlakeCodeReporter()
     check(code, filename, reporter)
-    return reporter.log
+    feedback = {}
+    for log in reporter.log:
+        if log['line_no'] not in feedback:
+            feedback[log['line_no']] = []
+        feedback[log['line_no']].append(log)
+    return feedback
 
 
 def check_pycodestyle(code):
@@ -102,8 +107,9 @@ def check_pycodestyle(code):
     """
     # PyCodeStyle reads input from files, so make a temporary file containing
     # the code.
-    _, code_filename = tempfile.mkstemp()
-    with open(code_filename, 'w') as code_file:
+    code_fd, code_filename = tempfile.mkstemp()
+    os.close(code_fd)
+    with open(code_filename, 'w', newline='') as code_file:
         code_file.write(code)
     # Configure which PEP8 rules to ignore.
     style = StyleGuide(parse_argv=False, config_file=False)
@@ -121,17 +127,20 @@ def check_pycodestyle(code):
     temp_out.close()
     code_file.close()
     os.remove(code_filename)
-    # Parse the output from the tool into a list of usefully structured data.
-    style_feedback = []
-    for result in results.split('\n'):
+    # Parse the output from the tool into a dictionary of structured data.
+    style_feedback = {}
+    for result in results.split(os.linesep):
         matcher = STYLE_REGEX.match(result)
         if matcher:
             line_no, col, msg = matcher.groups()
+            line_no = int(line_no) - 1
             code, description = msg.split(' ', 1)
             if code == 'E303':
                 description += ' above this line'
-            style_feedback.append({
-                'line_no': int(line_no),
+            if line_no not in style_feedback:
+                style_feedback[line_no] = []
+            style_feedback[line_no].append({
+                'line_no': line_no,
                 'column': int(col) - 1,
                 'message': description.capitalize(),
                 'code': code,
@@ -176,7 +185,7 @@ class MuFlakeCodeReporter:
                'missing characters!')
         self.log.append({
             'message': msg,
-            'line_no': int(line_no),
+            'line_no': int(line_no) - 1,  # Zero based counting in Mu.
             'column': column - 1,
             'source': source
         })
@@ -189,7 +198,7 @@ class MuFlakeCodeReporter:
         if matcher:
             line_no, msg = matcher.groups()
             self.log.append({
-                'line_no': int(line_no),
+                'line_no': int(line_no) - 1,  # Zero based counting in Mu.
                 'column': 0,
                 'message': msg,
             })
@@ -263,7 +272,8 @@ class Editor:
                         else:
                             self._view.add_tab(path, text)
         if not self._view.tab_count:
-            py = 'from microbit import *\n\n# Write your code here :-)'
+            py = 'from microbit import *{}{}# Write your code here :-)'.format(
+                os.linesep, os.linesep)
             self._view.add_tab(None, py)
         self._view.set_theme(self.theme)
 
@@ -464,14 +474,14 @@ class Editor:
             if path.endswith('.py'):
                 # Open the file, read the textual content and set the name as
                 # the path to the file.
-                with open(path) as f:
+                with open(path, newline='') as f:
                     text = f.read()
                 name = path
             else:
                 # Open the hex, extract the Python script therein and set the
                 # name to None, thus forcing the user to work out what to name
                 # the recovered script.
-                with open(path) as f:
+                with open(path, newline='') as f:
                     text = uflash.extract_script(f.read())
                 name = None
         except FileNotFoundError:
@@ -496,7 +506,7 @@ class Editor:
             if not os.path.basename(tab.path).endswith('.py'):
                 # No extension given, default to .py
                 tab.path += '.py'
-            with open(tab.path, 'w') as f:
+            with open(tab.path, 'w', newline='') as f:
                 logger.info('Saving script to: {}'.format(tab.path))
                 logger.debug(tab.text())
                 f.write(tab.text())
@@ -529,18 +539,13 @@ class Editor:
             return
         filename = tab.path if tab.path else 'untitled'
         flake = check_flake(filename, tab.text())
+        if flake:
+            logger.info(flake)
+            self._view.annotate_code(flake, 'error')
         pep8 = check_pycodestyle(tab.text())
-        # Consolidate the feedback into a dict, with line numbers as keys.
-        feedback = {}
-        for item in flake + pep8:
-            line_no = int(item['line_no']) - 1  # zero based counting in Mu.
-            if line_no in feedback:
-                feedback[line_no].append(item)
-            else:
-                feedback[line_no] = [item, ]
-        if feedback:
-            logger.info(feedback)
-            self._view.annotate_code(feedback)
+        if pep8:
+            logger.info(pep8)
+            self._view.annotate_code(pep8, 'style')
 
     def show_help(self):
         """
