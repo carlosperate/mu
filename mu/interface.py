@@ -17,10 +17,11 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
-import keyword
 import os
+import time
+import keyword
 import logging
-from PyQt5.QtCore import QSize, Qt, pyqtSignal, QIODevice
+from PyQt5.QtCore import QSize, Qt, pyqtSignal, QIODevice, QTimer
 from PyQt5.QtWidgets import (QToolBar, QAction, QStackedWidget, QDesktopWidget,
                              QWidget, QVBoxLayout, QShortcut, QSplitter,
                              QTabWidget, QFileDialog, QMessageBox, QTextEdit,
@@ -347,6 +348,34 @@ class EditorPane(QsciScintilla):
             for marker_id in self.indicators[indicator]['markers']:
                 if self.markerLine(marker_id) == line:
                     return marker_id
+
+    def scroll_to_line(self, target_line):
+        """
+        Scrolls the editor to the specified line.
+        """
+        first_line = self.firstVisibleLine()
+        if first_line == target_line:
+            return
+
+        self.ctimer = QTimer()
+        self.acceleration = 1
+
+        def get_next_line(current_line):
+            if current_line != target_line:
+                current_line += 1 if target_line > current_line else -1
+                return current_line
+
+        def move_to_line():
+            current_line = self.firstVisibleLine()
+            next_line = get_next_line(current_line)
+            if next_line:
+                self.setFirstVisibleLine(next_line)
+                if current_line != self.firstVisibleLine():
+                    delay = 150 // self.acceleration
+                    self.acceleration += 1 if self.acceleration < 20 else 0
+                    self.ctimer.singleShot(delay, move_to_line)
+
+        move_to_line()
 
 
 class ButtonBar(QToolBar):
@@ -723,6 +752,12 @@ class Window(QStackedWidget):
         self.set_theme(theme)
         self.show()
         self.autosize_window()
+
+    def scroll_to_line(self, line):
+        """
+        Scrolls current editor tab to the specified line.
+        """
+        self.current_tab.scroll_to_line(line)
 
 
 class REPLPane(QTextEdit):

@@ -152,7 +152,7 @@ def check_pycodestyle(code):
     os.remove(code_filename)
     # Parse the output from the tool into a dictionary of structured data.
     style_feedback = {}
-    for result in results.split(os.linesep):
+    for result in results.split('\n'):
         matcher = STYLE_REGEX.match(result)
         if matcher:
             line_no, col, msg = matcher.groups()
@@ -574,6 +574,10 @@ class Editor:
         if pep8:
             logger.info(pep8)
             self._view.annotate_code(pep8, 'style')
+        # Scroll the editor to first offending line
+        all_lines = [line for line in pep8] + [line for line in flake]
+        if all_lines:
+            self._view.scroll_to_line(min(all_lines))
 
     def show_help(self):
         """
