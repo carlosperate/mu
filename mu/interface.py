@@ -142,6 +142,10 @@ class DayTheme(Theme):
     Margin = QColor('#EEE')
     IndicatorError = QColor('red')
     IndicatorStyle = QColor('blue')
+    BraceForeground = Caret
+    BraceBackground = Paper
+    UnmatchedBraceForeground = QColor('red')
+    UnmatchedBraceBackground = Paper
 
 
 class NightTheme(Theme):
@@ -169,6 +173,10 @@ class NightTheme(Theme):
     Margin = QColor('#333')
     IndicatorError = QColor('white')
     IndicatorStyle = QColor('cyan')
+    BraceForeground = Caret
+    BraceBackground = Paper
+    UnmatchedBraceForeground = QColor('red')
+    UnmatchedBraceBackground = Paper
 
 
 class PythonLexer(QsciLexerPython):
@@ -208,6 +216,8 @@ class EditorPane(QsciScintilla):
             'style': {'id': 20, 'markers': {}}
         }
         self.MARKER_NUMBER = 22  # also arbitrary
+        self.BRACE_INDICATOR_ID = 25
+        self.UNMATCHED_BRACE_INDICATOR_ID = 26
         self.api = api if api else []
         self.setModified(False)
         self.configure()
@@ -233,6 +243,14 @@ class EditorPane(QsciScintilla):
         self.SendScintilla(QsciScintilla.SCI_SETHSCROLLBAR, 0)
         self.set_theme()
         self.markerDefine(self.RightArrow, self.MARKER_NUMBER)
+        self.setMatchedBraceIndicator(self.BRACE_INDICATOR_ID)
+        self.setIndicatorDrawUnder(True, self.BRACE_INDICATOR_ID)
+        self.indicatorDefine(self.PlainIndicator,
+                             self.BRACE_INDICATOR_ID)
+        self.setUnmatchedBraceIndicator(self.UNMATCHED_BRACE_INDICATOR_ID)
+        self.setIndicatorDrawUnder(True, self.UNMATCHED_BRACE_INDICATOR_ID)
+        self.indicatorDefine(self.PlainIndicator,
+                             self.UNMATCHED_BRACE_INDICATOR_ID)
         self.setMarginSensitivity(1, True)
         self.marginClicked.connect(self.on_marker_clicked)
         self.setAnnotationDisplay(self.AnnotationBoxed)
@@ -253,6 +271,18 @@ class EditorPane(QsciScintilla):
         self.setIndicatorForegroundColor(theme.IndicatorStyle,
                                          self.indicators['style']['id'])
         self.setMarkerBackgroundColor(theme.IndicatorError, self.MARKER_NUMBER)
+        # self.setMatchedBraceForegroundColor(theme.BraceForeground)
+        # self.setMatchedBraceBackgroundColor(theme.BraceBackground)
+        # self.setUnmatchedBraceForegroundColor(theme.UnmatchedBraceForeground)
+        # self.setUnmatchedBraceBackgroundColor(theme.UnmatchedBraceBackground)
+        self.setIndicatorForegroundColor(QColor('grey'),#theme.BraceForeground,
+                                         self.BRACE_INDICATOR_ID)
+        # self.setIndicatorOutlineColor(theme.BraceForeground,
+        #                               self.BRACE_INDICATOR_ID)
+        self.setIndicatorForegroundColor(theme.UnmatchedBraceForeground,
+                                         self.UNMATCHED_BRACE_INDICATOR_ID)
+        # self.setIndicatorOutlineColor(theme.UnmatchedBraceForeground,
+        #                               self.UNMATCHED_BRACE_INDICATOR_ID)
 
         api = QsciAPIs(self.lexer)
         for entry in self.api:
