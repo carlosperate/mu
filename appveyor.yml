@@ -70,4 +70,4 @@ deploy:
     secure: PlLCQKTcf9IzBXpEnXUxbJifb0usS7qcghnM0VxBTX0IL3C975JPidrYjP39ge7P
   bucket: ardublockly-builds
   set_public: true
-  folder: microbit\windows
+  folder: microbit\tests\windows
