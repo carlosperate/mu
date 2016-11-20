@@ -11,8 +11,12 @@ matrix:
       language: generic
 
 before_install:
-  # OS and Python info
+  # OS and Python info (includes additional debugging info)
   - uname -a
+  - if [ "$TRAVIS_OS_NAME" = "linux" ]; then ldd --version; fi
+  - if [ "$TRAVIS_OS_NAME" = "linux" ]; then strings /usr/lib/x86_64-linux-gnu/libstdc++.so.6 | grep GLIBC; fi
+  - if [ "$TRAVIS_OS_NAME" = "linux" ]; then python3 --version; fi
+  - if [ "$TRAVIS_OS_NAME" = "linux" ]; then python3 -c "import struct; print(struct.calcsize('P') * 8)"; fi
   - if [ "$TRAVIS_OS_NAME" = "linux" ]; then python3 -c "import sys; print(sys.executable)"; fi
   - if [ "$TRAVIS_OS_NAME" = "linux" ]; then sudo python3 -c "import sys; print(sys.executable)"; fi
 
