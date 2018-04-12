@@ -1,7 +1,7 @@
 """
-Mu - a "micro" Python editor for everyone.
+Mu - a "micro" Python editor for beginner programmers.
 
-Copyright (c) 2015-2016 Nicholas H.Tollervey and others (see the AUTHORS file).
+Copyright (c) 2015-2017 Nicholas H.Tollervey and others (see the AUTHORS file).
 
 Based upon work done for Puppy IDE by Dan Pope, Nicholas Tollervey and Damien
 George.
@@ -19,15 +19,23 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
-import os
-import sys
 import logging
+from logging.handlers import TimedRotatingFileHandler
+import os
+import platform
+import pkgutil
+import sys
+
+from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import QApplication, QSplashScreen
+
 from mu import __version__
-from mu.logic import Editor, LOG_FILE, LOG_DIR
+from mu.logic import Editor, LOG_FILE, LOG_DIR, DEBUGGER_PORT, ENCODING
 from mu.interface import Window
 from mu.resources import load_pixmap
-from mu.resources.api import MICROPYTHON_APIS
+from mu.modes import (PythonMode, AdafruitMode, MicrobitMode, DebugMode,
+                      PyGameZeroMode)
+from mu.debugger.runner import run as run_debugger
 
 
 def setup_logging():
@@ -36,11 +44,47 @@ def setup_logging():
     """
     if not os.path.exists(LOG_DIR):
         os.makedirs(LOG_DIR)
-    log_fmt = '%(asctime)s - %(name)s(%(funcName)s) %(levelname)s: %(message)s'
-    logging.basicConfig(filename=LOG_FILE, filemode='w', format=log_fmt,
-                        level=logging.DEBUG)
+
+    # set logging format
+    log_fmt = ('%(asctime)s - %(name)s:%(lineno)d(%(funcName)s) '
+               '%(levelname)s: %(message)s')
+    formatter = logging.Formatter(log_fmt)
+
+    # define log handlers such as for rotating log files
+    handler = TimedRotatingFileHandler(LOG_FILE, when='midnight',
+                                       backupCount=5, delay=0,
+                                       encoding=ENCODING)
+    handler.setFormatter(formatter)
+    handler.setLevel(logging.DEBUG)
+
+    # set up primary log
+    log = logging.getLogger()
+    log.setLevel(logging.DEBUG)
+    log.addHandler(handler)
     sys.excepthook = excepthook
-    print('Logging to {}'.format(LOG_FILE))
+    print(_('Logging to {}').format(LOG_FILE))
+
+
+def setup_modes(editor, view):
+    """
+    Create a simple dictionary to hold instances of the available modes.
+
+    *PREMATURE OPTIMIZATION ALERT* This may become more complex in future so
+    splitting things out here to contain the mess. ;-)
+    """
+    modes = {
+        'python': PythonMode(editor, view),
+        'adafruit': AdafruitMode(editor, view),
+        'microbit': MicrobitMode(editor, view),
+        'debugger': DebugMode(editor, view),
+    }
+
+    # Check if pgzero is available (without importing it)
+    if any([m for m in pkgutil.iter_modules() if 'pgzero' in m]):
+        modes['pygamezero'] = PyGameZeroMode(editor, view)
+
+    # return available modes
+    return modes
 
 
 def excepthook(*exc_args):
@@ -55,38 +99,62 @@ def excepthook(*exc_args):
 def run():
     """
     Creates all the top-level assets for the application, sets things up and
-    then runs the application.
+    then runs the application. Specific tasks include:
+
+    - set up logging
+    - create an application object
+    - create an editor window and status bar
+    - display a splash screen while starting
+    - close the splash screen after startup timer ends
     """
     setup_logging()
-    logging.info('Starting Mu {}'.format(__version__))
+    logging.info('\n\n-----------------\n\nStarting Mu {}'.format(__version__))
+    logging.info(platform.uname())
+    logging.info('Python path: {}'.format(sys.path))
+
     # The app object is the application running on your computer.
     app = QApplication(sys.argv)
-    # Display a friendly "splash" icon.
-    splash = QSplashScreen(load_pixmap('icon'))
-    splash.show()
+    app.setAttribute(Qt.AA_DontShowIconsInMenus)
+
     # Create the "window" we'll be looking at.
     editor_window = Window()
     # Create the "editor" that'll control the "window".
     editor = Editor(view=editor_window)
+    editor.setup(setup_modes(editor, editor_window))
     # Setup the window.
     editor_window.closeEvent = editor.quit
-    editor_window.setup(editor.theme, MICROPYTHON_APIS)
-    editor.restore_session()
-    # Connect the various buttons in the window to the editor.
-    button_bar = editor_window.button_bar
-    button_bar.connect("new", editor.new, "Ctrl+N")
-    button_bar.connect("load", editor.load, "Ctrl+O")
-    button_bar.connect("save", editor.save, "Ctrl+S")
-    button_bar.connect("flash", editor.flash)
-    button_bar.connect("files", editor.toggle_fs)
-    button_bar.connect("repl", editor.toggle_repl)
-    button_bar.connect("zoom-in", editor.zoom_in)
-    button_bar.connect("zoom-out", editor.zoom_out)
-    button_bar.connect("theme", editor.toggle_theme)
-    button_bar.connect("check", editor.check_code)
-    button_bar.connect("help", editor.show_help)
-    button_bar.connect("quit", editor.quit)
+    editor_window.setup(editor.debug_toggle_breakpoint, editor.theme)
+    # Restore the previous session along with files passed by the os
+    editor.restore_session(sys.argv[1:])
+    # Connect the various UI elements in the window to the editor.
+    editor_window.connect_tab_rename(editor.rename_tab, 'Ctrl+Shift+S')
+    status_bar = editor_window.status_bar
+    status_bar.connect_logs(editor.show_admin, 'Ctrl+Shift+D')
+
+    # Display a friendly "splash" icon.
+    splash = QSplashScreen(load_pixmap('splash-screen'))
+    splash.show()
+
     # Finished starting up the application, so hide the splash icon.
-    splash.finish(editor_window)
+    splash_be_gone = QTimer()
+    splash_be_gone.timeout.connect(lambda: splash.finish(editor_window))
+    splash_be_gone.setSingleShot(True)
+    splash_be_gone.start(5000)
+
     # Stop the program after the application finishes executing.
     sys.exit(app.exec_())
+
+
+def debug():
+    """
+    Create a debug runner in a new process.
+
+    This is what the Mu debugger will drive. Uses the filename and associated
+    args found in sys.argv.
+    """
+    if len(sys.argv) > 1:
+        filename = os.path.normcase(os.path.abspath(sys.argv[1]))
+        args = sys.argv[2:]
+        run_debugger('localhost', DEBUGGER_PORT, filename, args)
+    else:
+        print(_("Debugger requires a Python script filename to run."))

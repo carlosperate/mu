@@ -3,22 +3,183 @@
 Tests for the Editor and REPL logic.
 """
 import sys
-import os.path
+import os
+import codecs
+import contextlib
 import json
+import locale
+import re
+import shutil
+import subprocess
+import tempfile
+from unittest import mock
+import uuid
+
 import pytest
 import mu.logic
 from PyQt5.QtWidgets import QMessageBox
-from unittest import mock
-from mu import __version__
+from PyQt5.QtCore import pyqtSignal, QObject
 
+from mu import __version__
 
 SESSION = json.dumps({
     'theme': 'night',
+    'mode': 'python',
     'paths': [
         'path/foo.py',
         'path/bar.py',
     ],
+    'envars': [
+        ['name', 'value'],
+    ],
 })
+ENCODING_COOKIE = "# -*- coding: %s -*- " \
+    "# Encoding cookie added by Mu Editor" % mu.logic.ENCODING + \
+    mu.logic.NEWLINE
+
+
+#
+# Testing support functions
+# These functions generate testing scenarios or mocks making
+# the test more readable and easier to spot the element being
+# tested from among the boilerplate setup code
+#
+
+def _generate_python_files(contents, dirpath):
+    """Generate a series of .py files, one for each element in an iterable
+
+    contents should be an iterable (typically a list) containing one
+    string for each of a the number of files to be created. The files
+    will be created in the dirpath directory passed in which will neither
+    be created nor destroyed by this function.
+    """
+    for i, c in enumerate(contents):
+        name = uuid.uuid1().hex
+        filepath = os.path.join(dirpath, "%03d-%s.py" % (1 + i, name))
+        #
+        # Write using newline="" so line-ending tests can work!
+        # If a binary write is needed (eg for an encoding test) pass
+        # a list of empty strings as contents and then write the bytes
+        # as part of the test.
+        #
+        with open(filepath, "w", encoding=mu.logic.ENCODING, newline="") as f:
+            f.write(c)
+        yield filepath
+
+
+@contextlib.contextmanager
+def generate_python_files(contents, dirpath=None):
+    """Create a temp directory and populate it with .py files, then remove it
+    """
+    dirpath = dirpath or tempfile.mkdtemp(prefix="mu-")
+    yield list(_generate_python_files(contents, dirpath))
+    shutil.rmtree(dirpath)
+
+
+@contextlib.contextmanager
+def generate_python_file(text="", dirpath=None):
+    """Create a temp directory and populate it with on .py file, then remove it
+    """
+    dirpath = dirpath or tempfile.mkdtemp(prefix="mu-")
+    for filepath in _generate_python_files([text], dirpath):
+        yield filepath
+        break
+    shutil.rmtree(dirpath)
+
+
+@contextlib.contextmanager
+def generate_session(
+    theme="day",
+    mode="python",
+    file_contents=None,
+    filepath=None,
+    envars=[['name', 'value'], ],
+    **kwargs
+):
+    """Generate a temporary session file for one test
+
+    By default, the session file will be created inside a temporary directory
+    which will be removed afterwards. If filepath is specified the session
+    file will be created with that fully-specified path and filename.
+
+    If an iterable of file contents is specified (referring to text files to
+    be reloaded from a previous session) then files will be created in the
+    a directory with the contents provided.
+
+    If None is passed to any of the parameters that item will not be included
+    in the session data. Once all parameters have been considered if no session
+    data is present, the file will *not* be created.
+
+    Any additional kwargs are created as items in the data (eg to generate
+    invalid file contents)
+
+    The mu.logic.get_session_path function is mocked to return the
+    temporary filepath from this session.
+
+    The session is yielded to the contextmanager so the typical usage is:
+
+    with generate_session(mode="night") as session:
+        # do some test
+        assert <whatever>.mode == session['mode']
+    """
+    dirpath = tempfile.mkdtemp(prefix="mu-")
+    session_data = {}
+    if theme:
+        session_data['theme'] = theme
+    if mode:
+        session_data['mode'] = mode
+    if file_contents:
+        paths = _generate_python_files(file_contents, dirpath)
+        session_data['paths'] = list(paths)
+    if envars:
+        session_data['envars'] = envars
+    session_data.update(**kwargs)
+
+    if filepath is None:
+        filepath = os.path.join(dirpath, "session.json")
+    if session_data:
+        with open(filepath, "w") as f:
+            f.write(json.dumps(session_data))
+    session = dict(session_data)
+    session['session_filepath'] = filepath
+    with mock.patch("mu.logic.get_session_path", return_value=filepath):
+        yield session
+    shutil.rmtree(dirpath)
+
+
+def mocked_view(text, path, newline):
+    """Create a mocked view with path, newline and text
+    """
+    view = mock.MagicMock()
+    view.current_tab = mock.MagicMock()
+    view.current_tab.path = path
+    view.current_tab.newline = newline
+    view.current_tab.text = mock.MagicMock(return_value=text)
+    view.add_tab = mock.MagicMock()
+    view.get_save_path = mock.MagicMock(return_value=path)
+    view.get_load_path = mock.MagicMock()
+    view.add_tab = mock.MagicMock()
+    return view
+
+
+def mocked_editor(mode="python", text=None, path=None, newline=None):
+    """Return a mocked editor with a mocked view
+
+    This is intended to assist the several tests where a mocked editor
+    is needed but where the length of setup code to get there tends to
+    obscure the intent of the test
+    """
+    view = mocked_view(text, path, newline)
+    ed = mu.logic.Editor(view)
+    ed.select_mode = mock.MagicMock()
+    mock_mode = mock.MagicMock()
+    mock_mode.save_timeout = 5
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    mock_mode.api.return_value = ["API Specification"]
+    ed.modes = {
+        mode: mock_mode,
+    }
+    return ed
 
 
 def test_CONSTANTS():
@@ -28,50 +189,124 @@ def test_CONSTANTS():
     assert mu.logic.HOME_DIRECTORY
     assert mu.logic.DATA_DIR
     assert mu.logic.WORKSPACE_NAME
-    assert isinstance(mu.logic.BOARD_IDS, set)
 
 
-def test_find_microbit_no_ports():
+def test_write_and_flush():
     """
-    There are no connected devices so return None.
+    Ensure the write and flush function tries to write to the filesystem and
+    flush so the write happens immediately.
     """
-    with mock.patch('mu.logic.QSerialPortInfo.availablePorts',
-                    return_value=[]):
-        assert mu.logic.find_microbit() is None
+    mock_fd = mock.MagicMock()
+    mock_content = mock.MagicMock()
+    with mock.patch('mu.logic.os.fsync') as fsync:
+        mu.logic.write_and_flush(mock_fd, mock_content)
+        fsync.assert_called_once_with(mock_fd)
+    mock_fd.write.assert_called_once_with(mock_content)
+    mock_fd.flush.assert_called_once_with()
 
 
-def test_find_microbit_no_device():
+def test_save_and_encode():
     """
-    None of the connected devices is a micro:bit so return None.
+    When saving, ensure that encoding cookies are honoured, otherwise fall back
+    to the default encoding (UTF-8 -- as per Python standard practice).
     """
-    mock_port = mock.MagicMock()
-    mock_port.productIdentifier = mock.MagicMock(return_value=666)
-    mock_port.vendorIdentifier = mock.MagicMock(return_value=999)
-    with mock.patch('mu.logic.QSerialPortInfo.availablePorts',
-                    return_value=[mock_port, ]):
-        assert mu.logic.find_microbit() is None
+    encoding_cookie = '# -*- coding: latin-1 -*-'
+    text = encoding_cookie + '\n\nprint("Hello")'
+    mock_open = mock.MagicMock()
+    mock_wandf = mock.MagicMock()
+    # Valid cookie
+    with mock.patch('mu.logic.open', mock_open), \
+            mock.patch('mu.logic.write_and_flush', mock_wandf):
+        mu.logic.save_and_encode(text, 'foo.py')
+    mock_open.assert_called_once_with('foo.py', 'w', encoding='latin-1',
+                                      newline='')
+    mock_wandf.call_count == 1
+    mock_open.reset_mock()
+    mock_wandf.reset_mock()
+    # Invalid cookie
+    encoding_cookie = '# -*- coding: utf-42 -*-'
+    text = encoding_cookie + '\n\nprint("Hello")'
+    with mock.patch('mu.logic.open', mock_open), \
+            mock.patch('mu.logic.write_and_flush', mock_wandf):
+        mu.logic.save_and_encode(text, 'foo.py')
+    mock_open.assert_called_once_with('foo.py', 'w',
+                                      encoding=mu.logic.ENCODING,
+                                      newline='')
+    mock_wandf.call_count == 1
+    mock_open.reset_mock()
+    mock_wandf.reset_mock()
+    # No cookie
+    text = 'print("Hello")'
+    with mock.patch('mu.logic.open', mock_open), \
+            mock.patch('mu.logic.write_and_flush', mock_wandf):
+        mu.logic.save_and_encode(text, 'foo.py')
+    mock_open.assert_called_once_with('foo.py', 'w',
+                                      encoding=mu.logic.ENCODING,
+                                      newline='')
+    mock_wandf.call_count == 1
 
 
-def test_find_microbit_with_device():
+def test_sniff_encoding_from_BOM():
     """
-    If a device is found, return the port name.
+    Ensure an expected BOM detected at the start of the referenced file is
+    used to set the expected encoding.
     """
-    mock_port = mock.MagicMock()
-    for vid, pid in mu.logic.BOARD_IDS:
-        mock_port.vid = vid
-        mock_port.productIdentifier = mock.MagicMock()
-        mock_port.productIdentifier.return_value = pid
-        mock_port.vendorIdentifier = mock.MagicMock()
-        mock_port.vendorIdentifier.return_value = vid
-        mock_port.portName = mock.MagicMock(return_value='COM0')
-        with mock.patch('mu.logic.QSerialPortInfo.availablePorts',
-                        return_value=[mock_port, ]):
-            assert mu.logic.find_microbit() == 'COM0'
+    with mock.patch('mu.logic.open',
+                    mock.mock_open(read_data=codecs.BOM_UTF8 + b'# hello')):
+        assert mu.logic.sniff_encoding('foo.py') == 'utf-8-sig'
 
 
-def test_get_settings_app_path():
+def test_sniff_encoding_from_cookie():
     """
-    Find a settings file in the application location when run using Python.
+    If there's a cookie present, then use that to work out the expected
+    encoding.
+    """
+    encoding_cookie = b'# -*- coding: latin-1 -*-'
+    mock_locale = mock.MagicMock()
+    mock_locale.getpreferredencoding.return_value = 'UTF-8'
+    with mock.patch('mu.logic.open',
+                    mock.mock_open(read_data=encoding_cookie)), \
+            mock.patch('mu.logic.locale', mock_locale):
+        assert mu.logic.sniff_encoding('foo.py') == 'latin-1'
+
+
+def test_sniff_encoding_from_bad_cookie():
+    """
+    If there's a cookie present but we can't even read it, then return None.
+    """
+    encoding_cookie = '# -*- coding: silly-你好 -*-'.encode('utf-8')
+    mock_locale = mock.MagicMock()
+    mock_locale.getpreferredencoding.return_value = 'ascii'
+    with mock.patch('mu.logic.open',
+                    mock.mock_open(read_data=encoding_cookie)), \
+            mock.patch('mu.logic.locale', mock_locale):
+        assert mu.logic.sniff_encoding('foo.py') is None
+
+
+def test_sniff_encoding_fallback_to_locale():
+    """
+    If there's no encoding information in the file, just return None.
+    """
+    mock_locale = mock.MagicMock()
+    mock_locale.getpreferredencoding.return_value = 'ascii'
+    with mock.patch('mu.logic.open',
+                    mock.mock_open(read_data=b'# hello')), \
+            mock.patch('mu.logic.locale', mock_locale):
+        assert mu.logic.sniff_encoding('foo.py') is None
+
+
+def test_sniff_newline_convention():
+    """
+    Ensure sniff_newline_convention returns the expected newline convention.
+    """
+    text = 'the\r\ncat\nsat\non\nthe\r\nmat'
+    assert mu.logic.sniff_newline_convention(text) == '\n'
+
+
+def test_get_admin_file_path():
+    """
+    Finds an admin file in the application location, when Mu is run as if
+    NOT frozen by PyInstaller.
     """
     fake_app_path = os.path.dirname(__file__)
     fake_app_script = os.path.join(fake_app_path, 'run.py')
@@ -79,12 +314,13 @@ def test_get_settings_app_path():
     fake_local_settings = os.path.join(fake_app_path, 'settings.json')
     with mock.patch.object(sys, 'executable', wrong_fake_path), \
             mock.patch.object(sys, 'argv', [fake_app_script]):
-        assert mu.logic.get_settings_path() == fake_local_settings
+        result = mu.logic.get_admin_file_path('settings.json')
+        assert result == fake_local_settings
 
 
-def test_get_settings_app_path_frozen():
+def test_get_admin_file_path_frozen():
     """
-    Find a settings file in the application location when it has been frozen
+    Find an admin file in the application location when it has been frozen
     using PyInstaller.
     """
     fake_app_path = os.path.dirname(__file__)
@@ -95,12 +331,13 @@ def test_get_settings_app_path_frozen():
             mock.patch('platform.system', return_value='not_Darwin'), \
             mock.patch.object(sys, 'executable', fake_app_script), \
             mock.patch.object(sys, 'argv', [wrong_fake_path]):
-        assert mu.logic.get_settings_path() == fake_local_settings
+        result = mu.logic.get_admin_file_path('settings.json')
+        assert result == fake_local_settings
 
 
-def test_get_settings_app_path_frozen_osx():
+def test_get_admin_file_path_frozen_osx():
     """
-    Find a settings file in the application location when it has been frozen
+    Find an admin file in the application location when it has been frozen
     using PyInstaller on macOS (as the path is different in the app bundle).
     """
     fake_app_path = os.path.join(os.path.dirname(__file__), 'a', 'b', 'c')
@@ -112,16 +349,15 @@ def test_get_settings_app_path_frozen_osx():
             mock.patch('platform.system', return_value='Darwin'), \
             mock.patch.object(sys, 'executable', fake_app_script), \
             mock.patch.object(sys, 'argv', [wrong_fake_path]):
-        assert mu.logic.get_settings_path() == fake_local_settings
+        result = mu.logic.get_admin_file_path('settings.json')
+        assert result == fake_local_settings
 
 
-def test_get_settings_data_path():
+def test_get_admin_file_path_with_data_path():
     """
-    Find a settings file in the data location.
+    Find an admin file in the data location.
     """
-    mock_open = mock.MagicMock()
-    mock_open.return_value.__enter__ = lambda s: s
-    mock_open.return_value.__exit__ = mock.Mock()
+    mock_open = mock.mock_open()
     mock_exists = mock.MagicMock()
     mock_exists.side_effect = [False, True]
     mock_json_dump = mock.MagicMock()
@@ -129,31 +365,29 @@ def test_get_settings_data_path():
             mock.patch('builtins.open', mock_open), \
             mock.patch('json.dump', mock_json_dump), \
             mock.patch('mu.logic.DATA_DIR', 'fake_path'):
-        assert mu.logic.get_settings_path() == os.path.join(
-            'fake_path', 'settings.json')
+        result = mu.logic.get_admin_file_path('settings.json')
+        assert result == os.path.join('fake_path', 'settings.json')
     assert not mock_json_dump.called
 
 
-def test_get_settings_no_files():
+def test_get_admin_file_path_no_files():
     """
-    No settings files found, so create one.
+    No admin file found, so create one.
     """
-    mock_open = mock.MagicMock()
-    mock_open.return_value.__enter__ = lambda s: s
-    mock_open.return_value.__exit__ = mock.Mock()
+    mock_open = mock.mock_open()
     mock_json_dump = mock.MagicMock()
     with mock.patch('os.path.exists', return_value=False), \
             mock.patch('builtins.open', mock_open), \
             mock.patch('json.dump', mock_json_dump), \
             mock.patch('mu.logic.DATA_DIR', 'fake_path'):
-        assert mu.logic.get_settings_path() == os.path.join(
-            'fake_path', 'settings.json')
+        result = mu.logic.get_admin_file_path('settings.json')
+        assert result == os.path.join('fake_path', 'settings.json')
     assert mock_json_dump.call_count == 1
 
 
-def test_get_settings_no_files_cannot_create():
+def test_get_admin_file_path_no_files_cannot_create():
     """
-    No settings files found, attempting to create one causes Mu to log and
+    No admin file found, attempting to create one causes Mu to log and
     make do.
     """
     mock_open = mock.MagicMock()
@@ -165,25 +399,45 @@ def test_get_settings_no_files_cannot_create():
             mock.patch('json.dump', mock_json_dump), \
             mock.patch('mu.logic.DATA_DIR', 'fake_path'), \
             mock.patch('mu.logic.logger', return_value=None) as logger:
-        mu.logic.get_settings_path()
-        msg = 'Unable to create settings file: ' \
+        mu.logic.get_admin_file_path('settings.json')
+        msg = 'Unable to create admin file: ' \
               'fake_path{}settings.json'.format(os.path.sep)
         logger.error.assert_called_once_with(msg)
 
 
-def test_get_workspace():
+def test_get_session_path():
     """
-    Normally return generated folder otherwise user value
+    Ensure the result of calling get_admin_file_path with session.json returns
+    the expected result.
     """
-    should_be = os.path.join(mu.logic.HOME_DIRECTORY,
-                             mu.logic.WORKSPACE_NAME)
-    with mock.patch('mu.logic.get_settings_path',
-                    return_value='tests/settingswithoutworkspace.json'):
-        assert mu.logic.get_workspace_dir() == should_be
-    # read from our demo settings.json
-    with mock.patch('mu.logic.get_settings_path',
-                    return_value='tests/settings.json'):
-        assert mu.logic.get_workspace_dir() == '/home/foo/mycode'
+    mock_func = mock.MagicMock(return_value='foo')
+    with mock.patch('mu.logic.get_admin_file_path', mock_func):
+        assert mu.logic.get_session_path() == 'foo'
+        mock_func.assert_called_once_with('session.json')
+
+
+def test_get_settings_path():
+    """
+    Ensure the result of calling get_admin_file_path with settings.json returns
+    the expected result.
+    """
+    mock_func = mock.MagicMock(return_value='foo')
+    with mock.patch('mu.logic.get_admin_file_path', mock_func):
+        assert mu.logic.get_settings_path() == 'foo'
+        mock_func.assert_called_once_with('settings.json')
+
+
+def test_extract_envars():
+    """
+    Given a correct textual representation, get the expected list
+    representation of user defined environment variables.
+    """
+    raw = "FOO=BAR\n BAZ = Q=X    \n\n\n"
+    expected = mu.logic.extract_envars(raw)
+    assert expected == [
+        ['FOO', 'BAR'],
+        ['BAZ', 'Q=X'],
+    ]
 
 
 def test_check_flake():
@@ -215,6 +469,22 @@ def test_check_flake_needing_expansion():
         assert result == {}
         mock_check.assert_called_once_with(mu.logic.EXPANDED_IMPORT, 'foo.py',
                                            mock_r)
+
+
+def test_check_flake_with_builtins():
+    """
+    If a list of assumed builtin symbols is passed, any "undefined name"
+    messages for them are ignored.
+    """
+    mock_r = mock.MagicMock()
+    mock_r.log = [{'line_no': 2, 'column': 0,
+                  'message': "undefined name 'foo'"}]
+    with mock.patch('mu.logic.MuFlakeCodeReporter', return_value=mock_r), \
+            mock.patch('mu.logic.check', return_value=None) as mock_check:
+        result = mu.logic.check_flake('foo.py', 'some code',
+                                      builtins=['foo', ])
+        assert result == {}
+        mock_check.assert_called_once_with('some code', 'foo.py', mock_r)
 
 
 def test_check_pycodestyle():
@@ -334,32 +604,47 @@ def test_editor_init():
             mock.patch('os.makedirs', return_value=None) as mkd:
         e = mu.logic.Editor(view)
         assert e._view == view
-        assert e.repl is None
         assert e.theme == 'day'
-        assert mkd.call_count == 2
+        assert mkd.call_count == 1
         assert mkd.call_args_list[0][0][0] == mu.logic.DATA_DIR
-        assert mkd.call_args_list[1][0][0] == mu.logic.get_workspace_dir()
+
+
+def test_editor_setup():
+    """
+    An editor should have a modes attribute.
+    """
+    view = mock.MagicMock()
+    e = mu.logic.Editor(view)
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = 'foo'
+    mock_modes = {
+        'python': mock_mode,
+    }
+    with mock.patch('os.path.exists', return_value=False), \
+            mock.patch('os.makedirs', return_value=None) as mkd, \
+            mock.patch('shutil.copy') as mock_shutil:
+        e.setup(mock_modes)
+        assert mkd.call_count == 3
+        assert mkd.call_args_list[0][0][0] == 'foo'
+        assert mock_shutil.call_count == 3
+    assert e.modes == mock_modes
 
 
 def test_editor_restore_session():
     """
     A correctly specified session is restored properly.
     """
-    view = mock.MagicMock()
-    view.set_theme = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed._view.add_tab = mock.MagicMock()
-    mock_open = mock.MagicMock()
-    mock_open.return_value.__enter__ = lambda s: s
-    mock_open.return_value.__exit__ = mock.Mock()
-    mock_open.return_value.read.return_value = SESSION
-    with mock.patch('builtins.open', mock_open), \
-            mock.patch('os.path.exists', return_value=True):
+    mode, theme = "python", "night"
+    file_contents = ["", ""]
+    ed = mocked_editor(mode)
+
+    with generate_session(theme, mode, file_contents):
         ed.restore_session()
-    assert ed.theme == 'night'
-    assert mock_open.return_value.read.call_count == 3
-    assert ed._view.add_tab.call_count == 2
-    view.set_theme.assert_called_once_with('night')
+
+    assert ed.theme == theme
+    assert ed._view.add_tab.call_count == len(file_contents)
+    ed._view.set_theme.assert_called_once_with(theme)
+    assert ed.envars == [['name', 'value'], ]
 
 
 def test_editor_restore_session_missing_files():
@@ -367,16 +652,37 @@ def test_editor_restore_session_missing_files():
     Missing files that were opened tabs in the previous session are safely
     ignored when attempting to restore them.
     """
-    fake_settings = os.path.join(os.path.dirname(__file__), 'settings.json')
+    fake_session = os.path.join(os.path.dirname(__file__), 'session.json')
     view = mock.MagicMock()
     ed = mu.logic.Editor(view)
     ed._view.add_tab = mock.MagicMock()
-    get_test_settings_path = mock.MagicMock()
-    get_test_settings_path.return_value = fake_settings
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    mock_mode.save_timeout = 5
+    ed.modes = {
+        'python': mock_mode,
+    }
+    mock_gettext = mock.MagicMock()
+    mock_gettext.return_value = '# Write your code here :-)'
+    get_test_session_path = mock.MagicMock()
+    get_test_session_path.return_value = fake_session
     with mock.patch('os.path.exists', return_value=True), \
-            mock.patch('mu.logic.get_settings_path', get_test_settings_path):
+            mock.patch('mu.logic.get_session_path', get_test_session_path):
         ed.restore_session()
     assert ed._view.add_tab.call_count == 0
+
+
+def test_editor_restore_session_invalid_mode():
+    """
+    As Mu's modes are added and/or renamed, invalid mode names may need to be
+    ignored (this happens regularly when changing versions when developing
+    Mu itself).
+    """
+    valid_mode, invalid_mode = "python", uuid.uuid1().hex
+    ed = mocked_editor(valid_mode)
+    with generate_session(mode=invalid_mode):
+        ed.restore_session()
+    ed.select_mode.assert_called_once_with(None)
 
 
 def test_editor_restore_session_no_session_file():
@@ -388,11 +694,23 @@ def test_editor_restore_session_no_session_file():
     view.tab_count = 0
     ed = mu.logic.Editor(view)
     ed._view.add_tab = mock.MagicMock()
+    ed.select_mode = mock.MagicMock()
+    mock_mode = mock.MagicMock()
+    api = ['API specification', ]
+    mock_mode.api.return_value = api
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    mock_mode.save_timeout = 5
+    ed.modes = {
+        'python': mock_mode,
+    }
+    mock_gettext = mock.MagicMock()
+    mock_gettext.return_value = '# Write your code here :-)'
     with mock.patch('os.path.exists', return_value=False):
         ed.restore_session()
-    py = 'from microbit import *{}{}# Write your code here :-)'.format(
+    py = '# Write your code here :-)'.format(
         os.linesep, os.linesep)
-    ed._view.add_tab.assert_called_once_with(None, py)
+    ed._view.add_tab.assert_called_once_with(None, py, api, mu.logic.NEWLINE)
+    ed.select_mode.assert_called_once_with(None)
 
 
 def test_editor_restore_session_invalid_file():
@@ -404,415 +722,84 @@ def test_editor_restore_session_invalid_file():
     view.tab_count = 0
     ed = mu.logic.Editor(view)
     ed._view.add_tab = mock.MagicMock()
-    mock_open = mock.MagicMock()
-    mock_open.return_value.__enter__ = lambda s: s
-    mock_open.return_value.__exit__ = mock.Mock()
-    mock_open.return_value.read.return_value = '{"paths": ["path/foo.py",' \
-                                               ' "path/bar.py"]}, invalid: 0}'
+    mock_mode = mock.MagicMock()
+    api = ['API specification', ]
+    mock_mode.api.return_value = api
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    mock_mode.save_timeout = 5
+    ed.modes = {
+        'python': mock_mode,
+    }
+    mock_open = mock.mock_open(
+        read_data='{"paths": ["path/foo.py", "path/bar.py"]}, invalid: 0}')
+    mock_gettext = mock.MagicMock()
+    mock_gettext.return_value = '# Write your code here :-)'
     with mock.patch('builtins.open', mock_open), \
             mock.patch('os.path.exists', return_value=True):
         ed.restore_session()
-    py = 'from microbit import *{}{}# Write your code here :-)'.format(
-        os.linesep, os.linesep)
-    ed._view.add_tab.assert_called_once_with(None, py)
+    py = '# Write your code here :-)'
+    ed._view.add_tab.assert_called_once_with(None, py, api, mu.logic.NEWLINE)
 
 
-def test_flash_no_tab():
+def test_editor_open_focus_passed_file():
     """
-    If there are no active tabs simply return.
-    """
-    view = mock.MagicMock()
-    view.current_tab = None
-    ed = mu.logic.Editor(view)
-    assert ed.flash() is None
-
-
-def test_flash_with_attached_device():
-    """
-    Ensure the expected calls are made to uFlash and a helpful status message
-    is enacted.
-    """
-    with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
-            mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
-            mock.patch('mu.logic.uflash.find_microbit', return_value='bar'),\
-            mock.patch('mu.logic.os.path.exists', return_value=True),\
-            mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
-        view = mock.MagicMock()
-        view.current_tab.text = mock.MagicMock(return_value='')
-        view.show_message = mock.MagicMock()
-        ed = mu.logic.Editor(view)
-        ed.flash()
-        assert view.show_message.call_count == 1
-        hex_file_path = os.path.join('bar', 'micropython.hex')
-        s.assert_called_once_with('foo', hex_file_path)
-
-
-def test_flash_user_specified_device_path():
-    """
-    Ensure that if a micro:bit is not automatically found by uflash then it
-    prompts the user to locate the device and, assuming a path was given,
-    saves the hex in the expected location.
-    """
-    with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
-            mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
-            mock.patch('mu.logic.uflash.find_microbit', return_value=None),\
-            mock.patch('mu.logic.os.path.exists', return_value=True),\
-            mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
-        view = mock.MagicMock()
-        view.get_microbit_path = mock.MagicMock(return_value='bar')
-        view.current_tab.text = mock.MagicMock(return_value='')
-        view.show_message = mock.MagicMock()
-        ed = mu.logic.Editor(view)
-        ed.flash()
-        home = mu.logic.HOME_DIRECTORY
-        view.get_microbit_path.assert_called_once_with(home)
-        assert view.show_message.call_count == 1
-        assert ed.user_defined_microbit_path == 'bar'
-        hex_file_path = os.path.join('bar', 'micropython.hex')
-        s.assert_called_once_with('foo', hex_file_path)
-
-
-def test_flash_existing_user_specified_device_path():
-    """
-    Ensure that if a micro:bit is not automatically found by uflash and the
-    user has previously specified a path to the device, then the hex is saved
-    in the specified location.
-    """
-    with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
-            mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
-            mock.patch('mu.logic.uflash.find_microbit', return_value=None),\
-            mock.patch('mu.logic.os.path.exists', return_value=True),\
-            mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
-        view = mock.MagicMock()
-        view.get_microbit_path = mock.MagicMock(return_value='bar')
-        view.current_tab.text = mock.MagicMock(return_value='')
-        view.show_message = mock.MagicMock()
-        ed = mu.logic.Editor(view)
-        ed.user_defined_microbit_path = 'baz'
-        ed.flash()
-        assert view.get_microbit_path.call_count == 0
-        assert view.show_message.call_count == 1
-        hex_file_path = os.path.join('baz', 'micropython.hex')
-        s.assert_called_once_with('foo', hex_file_path)
-
-
-def test_flash_path_specified_does_not_exist():
-    """
-    Ensure that if a micro:bit is not automatically found by uflash and the
-    user has previously specified a path to the device, then the hex is saved
-    in the specified location.
-    """
-    with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
-            mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
-            mock.patch('mu.logic.uflash.find_microbit', return_value=None),\
-            mock.patch('mu.logic.os.path.exists', return_value=False),\
-            mock.patch('mu.logic.os.makedirs', return_value=None), \
-            mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
-        view = mock.MagicMock()
-        view.current_tab.text = mock.MagicMock(return_value='')
-        view.show_message = mock.MagicMock()
-        ed = mu.logic.Editor(view)
-        ed.user_defined_microbit_path = 'baz'
-        ed.flash()
-        message = 'Could not find an attached BBC micro:bit.'
-        information = ("Please ensure you leave enough time for the BBC"
-                       " micro:bit to be attached and configured correctly"
-                       " by your computer. This may take several seconds."
-                       " Alternatively, try removing and re-attaching the"
-                       " device or saving your work and restarting Mu if"
-                       " the device remains unfound.")
-        view.show_message.assert_called_once_with(message, information)
-        assert s.call_count == 0
-        assert ed.user_defined_microbit_path is None
-
-
-def test_flash_without_device():
-    """
-    If no device is found and the user doesn't provide a path then ensure a
-    helpful status message is enacted.
-    """
-    with mock.patch('mu.logic.uflash.hexlify', return_value=''), \
-            mock.patch('mu.logic.uflash.embed_hex', return_value='foo'), \
-            mock.patch('mu.logic.uflash.find_microbit', return_value=None), \
-            mock.patch('mu.logic.uflash.save_hex', return_value=None) as s:
-        view = mock.MagicMock()
-        view.get_microbit_path = mock.MagicMock(return_value=None)
-        view.current_tab.text = mock.MagicMock(return_value='')
-        view.show_message = mock.MagicMock()
-        ed = mu.logic.Editor(view)
-        ed.flash()
-        message = 'Could not find an attached BBC micro:bit.'
-        information = ("Please ensure you leave enough time for the BBC"
-                       " micro:bit to be attached and configured correctly"
-                       " by your computer. This may take several seconds."
-                       " Alternatively, try removing and re-attaching the"
-                       " device or saving your work and restarting Mu if"
-                       " the device remains unfound.")
-        view.show_message.assert_called_once_with(message, information)
-        home = mu.logic.HOME_DIRECTORY
-        view.get_microbit_path.assert_called_once_with(home)
-        assert s.call_count == 0
-
-
-def test_flash_script_too_big():
-    """
-    If the script in the current tab is too big, abort in the expected way.
+    A file passed in by the OS is opened
     """
     view = mock.MagicMock()
-    view.current_tab.text = mock.MagicMock(return_value='x' * 8193)
-    view.current_tab.label = 'foo'
-    view.show_message = mock.MagicMock()
+    view.tab_count = 0
     ed = mu.logic.Editor(view)
-    ed.flash()
-    view.show_message.assert_called_once_with('Unable to flash "foo"',
-                                              'Your script is too long!',
-                                              'Warning')
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    mock_mode.save_timeout = 5
+    ed.modes = {
+        'python': mock_mode,
+    }
+    ed._load = mock.MagicMock()
+    file_path = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        'scripts',
+        'contains_red.py'
+    )
+    ed.select_mode = mock.MagicMock()
+    with mock.patch("builtins.open", mock.mock_open(read_data="data")):
+        ed.restore_session([file_path])
+        ed._load.assert_called_once_with(file_path)
 
 
-def test_add_fs_no_repl():
+def test_editor_session_and_open_focus_passed_file():
     """
-    It's possible to add the file system pane if the REPL is inactive.
+    A passed in file is merged with session, opened last
+    so it receives focus
+    It will be the middle position in the session
     """
     view = mock.MagicMock()
     ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.microfs.get_serial', return_value=True):
-        ed.add_fs()
-    workspace = mu.logic.get_workspace_dir()
-    view.add_filesystem.assert_called_once_with(home=workspace)
-    assert ed.fs
+    ed.modes = mock.MagicMock()
+    ed.direct_load = mock.MagicMock()
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    mock_mode.save_timeout = 5
+    ed.modes = {
+        'python': mock_mode,
+    }
+    ed.select_mode = mock.MagicMock()
+    settings = json.dumps({
+        "paths": ["path/foo.py",
+                  "path/bar.py"]}, )
+    mock_open = mock.mock_open(read_data=settings)
+    with mock.patch('builtins.open', mock_open), \
+            mock.patch('os.path.exists', return_value=True):
+        ed.restore_session(paths=['path/foo.py'])
 
-
-def test_add_fs_with_repl():
-    """
-    If the REPL is active, you can't add the file system pane.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.repl = True
-    with mock.patch('mu.logic.microfs.get_serial', return_value=True):
-        ed.add_fs()
-    assert view.add_filesystem.call_count == 0
-
-
-def test_add_fs_no_device():
-    """
-    If there's no device attached then ensure a helpful message is displayed.
-    """
-    view = mock.MagicMock()
-    view.show_message = mock.MagicMock()
-    ex = IOError('BOOM')
-    ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.microfs.get_serial', side_effect=ex):
-        ed.add_fs()
-    assert view.show_message.call_count == 1
-
-
-def test_remove_fs_no_fs():
-    """
-    Removing a non-existent file system raises a RuntimeError.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.fs = None
-    with pytest.raises(RuntimeError):
-        ed.remove_fs()
-
-
-def test_remove_fs():
-    """
-    Removing the file system results in the expected state.
-    """
-    view = mock.MagicMock()
-    view.remove_repl = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.fs = True
-    ed.remove_fs()
-    assert view.remove_filesystem.call_count == 1
-    assert ed.fs is None
-
-
-def test_toggle_fs_on():
-    """
-    If the fs is off, toggle it on.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.add_fs = mock.MagicMock()
-    ed.repl = None
-    ed.fs = None
-    ed.toggle_fs()
-    assert ed.add_fs.call_count == 1
-
-
-def test_toggle_fs_off():
-    """
-    If the fs is on, toggle if off.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.remove_fs = mock.MagicMock()
-    ed.repl = None
-    ed.fs = True
-    ed.toggle_fs()
-    assert ed.remove_fs.call_count == 1
-
-
-def test_toggle_fs_with_repl():
-    """
-    If the REPL is active, ensure a helpful message is displayed.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.add_repl = mock.MagicMock()
-    ed.repl = True
-    ed.fs = None
-    ed.toggle_fs()
-    assert view.show_message.call_count == 1
-
-
-def test_add_repl_with_fs():
-    """
-    Raise a RuntimeError if the file system exists to use the serial link.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.fs = True
-    with pytest.raises(RuntimeError):
-        ed.add_repl()
-
-
-def test_add_repl_already_exists():
-    """
-    Ensure the editor raises a RuntimeError if the repl already exists.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.repl = True
-    with pytest.raises(RuntimeError):
-        ed.add_repl()
-
-
-def test_add_repl_no_port():
-    """
-    If it's not possible to find a connected micro:bit then ensure a helpful
-    message is enacted.
-    """
-    view = mock.MagicMock()
-    view.show_message = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.find_microbit', return_value=False):
-        ed.add_repl()
-    assert view.show_message.call_count == 1
-    message = 'Could not find an attached BBC micro:bit.'
-    assert view.show_message.call_args[0][0] == message
-
-
-def test_add_repl_ioerror():
-    """
-    Sometimes when attempting to connect to the device there is an IOError
-    because it's still booting up or connecting to the host computer. In this
-    case, ensure a useful message is displayed.
-    """
-    view = mock.MagicMock()
-    view.show_message = mock.MagicMock()
-    ex = IOError('BOOM')
-    view.add_repl = mock.MagicMock(side_effect=ex)
-    ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.find_microbit', return_value='COM0'):
-        ed.add_repl()
-    assert view.show_message.call_count == 1
-    assert view.show_message.call_args[0][0] == str(ex)
-
-
-def test_add_repl_exception():
-    """
-    Ensure that any non-IOError based exceptions are logged.
-    """
-    view = mock.MagicMock()
-    ex = Exception('BOOM')
-    view.add_repl = mock.MagicMock(side_effect=ex)
-    ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.find_microbit', return_value='COM0'), \
-            mock.patch('mu.logic.logger', return_value=None) as logger:
-        ed.add_repl()
-        logger.error.assert_called_once_with(ex)
-
-
-def test_add_repl():
-    """
-    Nothing goes wrong so check the _view.add_repl gets the expected argument.
-    """
-    view = mock.MagicMock()
-    view.show_message = mock.MagicMock()
-    view.add_repl = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.find_microbit', return_value='COM0'), \
-            mock.patch('os.name', 'nt'):
-        ed.add_repl()
-    assert view.show_message.call_count == 0
-    assert view.add_repl.call_args[0][0].port == 'COM0'
-
-
-def test_remove_repl_is_none():
-    """
-    If there's no repl to remove raise a RuntimeError.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.repl = None
-    with pytest.raises(RuntimeError):
-        ed.remove_repl()
-
-
-def test_remove_repl():
-    """
-    If there is a repl, make sure it's removed as expected and the state is
-    updated.
-    """
-    view = mock.MagicMock()
-    view.remove_repl = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.repl = True
-    ed.remove_repl()
-    assert view.remove_repl.call_count == 1
-    assert ed.repl is None
-
-
-def test_toggle_repl_on():
-    """
-    There is no repl, so toggle on.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.add_repl = mock.MagicMock()
-    ed.repl = None
-    ed.toggle_repl()
-    assert ed.add_repl.call_count == 1
-
-
-def test_toggle_repl_off():
-    """
-    There is a repl, so toggle off.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.remove_repl = mock.MagicMock()
-    ed.repl = True
-    ed.toggle_repl()
-    assert ed.remove_repl.call_count == 1
-
-
-def test_toggle_repl_with_fs():
-    """
-    If the file system is active, show a helpful message instead.
-    """
-    view = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    ed.remove_repl = mock.MagicMock()
-    ed.repl = None
-    ed.fs = True
-    ed.toggle_repl()
-    assert view.show_message.call_count == 1
+    # direct_load should be called twice (once for each path)
+    assert ed.direct_load.call_count == 2
+    # However, "foo.py" as the passed_filename should be direct_load-ed
+    # at the end so it has focus, despite being the first file listed in
+    # the restored session.
+    assert ed.direct_load.call_args_list[0][0][0] == os.path.abspath(
+        'path/bar.py')
+    assert ed.direct_load.call_args_list[1][0][0] == os.path.abspath(
+        'path/foo.py')
 
 
 def test_toggle_theme_to_night():
@@ -831,7 +818,21 @@ def test_toggle_theme_to_night():
 
 def test_toggle_theme_to_day():
     """
-    The current theme is 'night' so toggle to day. Expect the state to be
+    The current theme is 'contrast' so toggle to day. Expect the state to be
+    updated and the appropriate call to the UI layer is made.
+    """
+    view = mock.MagicMock()
+    view.set_theme = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    ed.theme = 'contrast'
+    ed.toggle_theme()
+    assert ed.theme == 'day'
+    view.set_theme.assert_called_once_with(ed.theme)
+
+
+def test_toggle_theme_to_contrast():
+    """
+    The current theme is 'night' so toggle to contrast. Expect the state to be
     updated and the appropriate call to the UI layer is made.
     """
     view = mock.MagicMock()
@@ -839,7 +840,7 @@ def test_toggle_theme_to_day():
     ed = mu.logic.Editor(view)
     ed.theme = 'night'
     ed.toggle_theme()
-    assert ed.theme == 'day'
+    assert ed.theme == 'contrast'
     view.set_theme.assert_called_once_with(ed.theme)
 
 
@@ -849,28 +850,118 @@ def test_new():
     """
     view = mock.MagicMock()
     view.add_tab = mock.MagicMock()
+    mock_mode = mock.MagicMock()
+    api = ['API specification', ]
+    mock_mode.api.return_value = api
     ed = mu.logic.Editor(view)
+    ed.modes = {
+        'python': mock_mode,
+    }
     ed.new()
-    view.add_tab.assert_called_once_with(None, '')
+    view.add_tab.assert_called_once_with(None, '', api, mu.logic.NEWLINE)
 
 
 def test_load_python_file():
     """
     If the user specifies a Python file (*.py) then ensure it's loaded and
     added as a tab.
+
+    The Python code loaded will have a Mu encoding cookie prepended to it
+    or have its own one replaced by a Mu cookie
     """
-    view = mock.MagicMock()
-    view.get_load_path = mock.MagicMock(return_value='foo.py')
-    view.add_tab = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    mock_open = mock.MagicMock()
-    mock_open.return_value.__enter__ = lambda s: s
-    mock_open.return_value.__exit__ = mock.Mock()
-    mock_open.return_value.read.return_value = 'PYTHON'
-    with mock.patch('builtins.open', mock_open):
-        ed.load()
-    assert view.get_load_path.call_count == 1
-    view.add_tab.assert_called_once_with('foo.py', 'PYTHON')
+    text, newline = "python", "\n"
+    ed = mocked_editor()
+    with generate_python_file(text) as filepath:
+        ed._view.get_load_path.return_value = filepath
+        with mock.patch("mu.logic.read_and_decode") as mock_read:
+            mock_read.return_value = text, newline
+            ed.load()
+
+    mock_read.assert_called_once_with(filepath)
+    ed._view.add_tab.assert_called_once_with(
+        filepath,
+        text,
+        ed.modes[ed.mode].api(),
+        newline)
+
+
+def test_load_python_file_case_insensitive_file_type():
+    """
+    If the user specifies a Python file (*.PY) then ensure it's loaded and
+    added as a tab.
+
+    The Python code loaded will have a Mu encoding cookie prepended to it
+    or have its own one replaced by a Mu cookie
+    """
+    text, newline = "python", "\n"
+    ed = mocked_editor()
+    with generate_python_file(text) as filepath:
+        ed._view.get_load_path.return_value = filepath.upper()
+        with mock.patch("mu.logic.read_and_decode") as mock_read:
+            mock_read.return_value = text, newline
+            ed.load()
+
+    mock_read.assert_called_once_with(filepath.upper())
+    ed._view.add_tab.assert_called_once_with(
+        filepath.upper(),
+        text,
+        ed.modes[ed.mode].api(),
+        newline)
+
+
+def test_load_python_unicode_error():
+    """
+    If Mu encounters a UnicodeDecodeError when trying to read and decode the
+    file, it should display a helpful message explaining the problem.
+    """
+    text = "not utf encoded content"
+    ed = mocked_editor()
+    with generate_python_file(text) as filepath:
+        ed._view.get_load_path.return_value = filepath
+        with mock.patch("mu.logic.read_and_decode") as mock_read:
+            mock_read.side_effect = UnicodeDecodeError('funnycodec',
+                                                       b'\x00\x00', 1, 2,
+                                                       'A fake reason!')
+            ed.load()
+    assert ed._view.show_message.call_count == 1
+
+
+def test_no_duplicate_load_python_file():
+    """
+    If the user specifies a file already loaded, ensure this is detected.
+    """
+    brown_script = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        'scripts',
+        'contains_brown.py'
+    )
+
+    editor_window = mock.MagicMock()
+    editor_window.show_message = mock.MagicMock()
+    editor_window.focus_tab = mock.MagicMock()
+    editor_window.add_tab = mock.MagicMock()
+
+    brown_tab = mock.MagicMock()
+    brown_tab.path = brown_script
+    unsaved_tab = mock.MagicMock()
+    unsaved_tab.path = None
+
+    editor_window.widgets = [unsaved_tab, brown_tab]
+
+    editor_window.get_load_path = mock.MagicMock(return_value=brown_script)
+    # Create the "editor" that'll control the "window".
+    editor = mu.logic.Editor(view=editor_window)
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    editor.modes = {
+        'python': mock_mode,
+    }
+
+    editor.load()
+    message = 'The file "{}" is already open.'.format(os.path.basename(
+                                                      brown_script))
+    editor_window.show_message.assert_called_once_with(message)
+    editor_window.add_tab.assert_not_called()
 
 
 def test_load_hex_file():
@@ -882,10 +973,14 @@ def test_load_hex_file():
     view.get_load_path = mock.MagicMock(return_value='foo.hex')
     view.add_tab = mock.MagicMock()
     ed = mu.logic.Editor(view)
-    mock_open = mock.MagicMock()
-    mock_open.return_value.__enter__ = lambda s: s
-    mock_open.return_value.__exit__ = mock.Mock()
-    mock_open.return_value.read.return_value = 'PYTHON'
+    mock_mode = mock.MagicMock()
+    api = ['API specification', ]
+    mock_mode.api.return_value = api
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    ed.modes = {
+        'python': mock_mode,
+    }
+    mock_open = mock.mock_open(read_data='PYTHON')
     hex_file = 'RECOVERED'
     with mock.patch('builtins.open', mock_open), \
             mock.patch('mu.logic.uflash.extract_script',
@@ -893,7 +988,80 @@ def test_load_hex_file():
         ed.load()
     assert view.get_load_path.call_count == 1
     assert s.call_count == 1
-    view.add_tab.assert_called_once_with(None, 'RECOVERED')
+    view.add_tab.assert_called_once_with(None, 'RECOVERED', api, os.linesep)
+
+
+def test_load_hex_file_breaks():
+    """
+    If the user specifies a hex file (*.hex) and an error is encountered ensure
+    Mu reports a helpful message.
+    """
+    view = mock.MagicMock()
+    view.get_load_path = mock.MagicMock(return_value='foo.hex')
+    view.add_tab = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    mock_mode = mock.MagicMock()
+    api = ['API specification', ]
+    mock_mode.api.return_value = api
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    ed.modes = {
+        'python': mock_mode,
+    }
+    mock_open = mock.mock_open(read_data='PYTHON')
+    with mock.patch('builtins.open', mock_open), \
+            mock.patch('mu.logic.uflash.extract_script',
+                       side_effect=Exception('BOOM')) as s:
+        ed.load()
+    assert view.get_load_path.call_count == 1
+    assert s.call_count == 1
+    assert view.show_message.call_count == 1
+
+
+def test_load_not_python_or_hex():
+    """
+    If the user tries to open a file that isn't .py or .hex then Mu should
+    report a helpful message.
+    """
+    view = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    ed._load('unknown_filetype.foo')
+    assert view.show_message.call_count == 1
+
+
+#
+# When loading files Mu makes a note of the majority line-ending convention
+# in use in the file. When it is saved, that convention is used.
+#
+def test_load_stores_newline():
+    """
+    When a file is loaded, its newline convention should be held on the tab
+    for use when saving.
+    """
+    newline = "r\n"
+    text = newline.join("the cat sat on the mat".split())
+    editor = mocked_editor()
+    with generate_python_file("abc\r\ndef") as filepath:
+        editor._view.get_load_path.return_value = filepath
+        editor.load()
+
+    assert editor._view.add_tab.called_with(
+        filepath, text, editor.modes[editor.mode].api(), "\r\n")
+
+
+def test_save_restores_newline():
+    """
+    When a file is saved the newline convention noted originally should
+    be used.
+    """
+    newline = "\r\n"
+    test_text = mu.logic.NEWLINE.join(
+        "the cat sat on the mat".split()
+    )
+    with generate_python_file(test_text) as filepath:
+        with mock.patch("mu.logic.save_and_encode") as mock_save:
+            ed = mocked_editor(text=test_text, newline=newline, path=filepath)
+            ed.save()
+            assert mock_save.called_with(test_text, filepath, newline)
 
 
 def test_load_error():
@@ -905,6 +1073,11 @@ def test_load_error():
     view.add_tab = mock.MagicMock()
     ed = mu.logic.Editor(view)
     mock_open = mock.MagicMock(side_effect=FileNotFoundError())
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = '/fake/path'
+    ed.modes = {
+        'python': mock_mode,
+    }
     with mock.patch('builtins.open', mock_open):
         ed.load()
     assert view.get_load_path.call_count == 1
@@ -928,23 +1101,12 @@ def test_save_no_path():
     If there's no path associated with the tab then request the user provide
     one.
     """
-    view = mock.MagicMock()
-    view.current_tab = mock.MagicMock()
-    view.current_tab.path = None
-    view.current_tab.text = mock.MagicMock(return_value='foo')
-    view.get_save_path = mock.MagicMock(return_value='foo.py')
-    mock_open_atomic = mock.MagicMock()
-    mock_open_atomic.return_value.__enter__ = lambda s: s
-    mock_open_atomic.return_value.__exit__ = mock.Mock()
-    mock_open_atomic.return_value.write = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.get_workspace_dir', return_value='/fake/path'), \
-            mock.patch('mu.logic.open_atomic', mock_open_atomic):
+    text, path, newline = "foo", "foo.py", "\n"
+    ed = mocked_editor(text=text, path=None, newline=newline)
+    ed._view.get_save_path.return_value = path
+    with mock.patch("mu.logic.save_and_encode") as mock_save:
         ed.save()
-    assert mock_open_atomic.call_count == 1
-    mock_open_atomic.assert_called_with('foo.py', 'w', newline='')
-    mock_open_atomic.return_value.write.assert_called_once_with('foo')
-    view.get_save_path.assert_called_once_with('/fake/path')
+    mock_save.assert_called_with(text, path, newline)
 
 
 def test_save_no_path_no_path_given():
@@ -952,14 +1114,45 @@ def test_save_no_path_no_path_given():
     If there's no path associated with the tab and the user cancels providing
     one, ensure the path is correctly re-set.
     """
-    view = mock.MagicMock()
-    view.current_tab = mock.MagicMock()
-    view.current_tab.path = None
-    view.get_save_path = mock.MagicMock(return_value='')
-    ed = mu.logic.Editor(view)
+    text, newline = "foo", "\n"
+    ed = mocked_editor(text=text, path=None, newline=newline)
+    ed._view.get_save_path.return_value = ''
     ed.save()
     # The path isn't the empty string returned from get_save_path.
-    assert view.current_tab.path is None
+    assert ed._view.current_tab.path is None
+
+
+def test_save_file_with_exception():
+    """
+    If the file cannot be written, return an error message.
+    """
+    view = mock.MagicMock()
+    view.current_tab = mock.MagicMock()
+    view.current_tab.path = 'foo.py'
+    view.current_tab.text = mock.MagicMock(return_value='foo')
+    view.current_tab.setModified = mock.MagicMock(return_value=None)
+    view.show_message = mock.MagicMock()
+    mock_open = mock.MagicMock(side_effect=OSError())
+    ed = mu.logic.Editor(view)
+    with mock.patch('builtins.open', mock_open):
+        ed.save()
+    assert view.current_tab.setModified.call_count == 0
+    assert view.show_message.call_count == 1
+
+
+def test_save_file_with_encoding_error():
+    """
+    If Mu encounters a UnicodeEncodeError when trying to write the file,
+    it should display a helpful message explaining the problem.
+    """
+    text, path, newline = "foo", "foo", "\n"
+    ed = mocked_editor(text=text, path=path, newline=newline)
+    with mock.patch("mu.logic.save_and_encode") as mock_save:
+        mock_save.side_effect = UnicodeEncodeError(mu.logic.ENCODING, "",
+                                                   0, 0, "Unable to encode")
+        ed.save()
+
+    assert ed._view.current_tab.setModified.call_count == 0
 
 
 def test_save_python_file():
@@ -967,21 +1160,19 @@ def test_save_python_file():
     If the path is a Python file (ending in *.py) then save it and reset the
     modified flag.
     """
+    path, contents, newline = "foo.py", "foo", "\n"
     view = mock.MagicMock()
     view.current_tab = mock.MagicMock()
-    view.current_tab.path = 'foo.py'
-    view.current_tab.text = mock.MagicMock(return_value='foo')
-    view.get_save_path = mock.MagicMock()
+    view.current_tab.path = path
+    view.current_tab.text = mock.MagicMock(return_value=contents)
+    view.current_tab.newline = "\n"
+    view.get_save_path = mock.MagicMock(return_value=path)
     view.current_tab.setModified = mock.MagicMock(return_value=None)
-    mock_open_atomic = mock.MagicMock()
-    mock_open_atomic.return_value.__enter__ = lambda s: s
-    mock_open_atomic.return_value.__exit__ = mock.Mock()
-    mock_open_atomic.return_value.write = mock.MagicMock()
     ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.open_atomic', mock_open_atomic):
+    with mock.patch("mu.logic.save_and_encode") as mock_save:
         ed.save()
-    mock_open_atomic.assert_called_once_with('foo.py', 'w', newline='')
-    mock_open_atomic.return_value.write.assert_called_once_with('foo')
+
+    mock_save.assert_called_once_with(contents, path, newline)
     assert view.get_save_path.call_count == 0
     view.current_tab.setModified.assert_called_once_with(False)
 
@@ -990,21 +1181,56 @@ def test_save_with_no_file_extension():
     """
     If the path doesn't end in *.py then append it to the filename.
     """
-    view = mock.MagicMock()
-    view.current_tab = mock.MagicMock()
-    view.current_tab.path = 'foo'
-    view.current_tab.text = mock.MagicMock(return_value='foo')
-    view.get_save_path = mock.MagicMock()
-    mock_open_atomic = mock.MagicMock()
-    mock_open_atomic.return_value.__enter__ = lambda s: s
-    mock_open_atomic.return_value.__exit__ = mock.Mock()
-    mock_open_atomic.return_value.write = mock.MagicMock()
-    ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.open_atomic', mock_open_atomic):
+    text, path, newline = "foo", "foo", "\n"
+    ed = mocked_editor(text=text, path=path, newline=newline)
+    with mock.patch('mu.logic.save_and_encode') as mock_save:
         ed.save()
-    mock_open_atomic.assert_called_once_with('foo.py', 'w', newline='')
-    mock_open_atomic.return_value.write.assert_called_once_with('foo')
-    assert view.get_save_path.call_count == 0
+    mock_save.assert_called_once_with(text, path + ".py", newline)
+    ed._view.get_save_path.call_count == 0
+
+
+def test_save_with_non_py_file_extension():
+    """
+    If the path ends in an extension, save it using the extension
+    """
+    text, path, newline = "foo", "foo.txt", "\n"
+    ed = mocked_editor(text=text, path=path, newline=newline)
+    ed._view.get_save_path.return_value = path
+    with mock.patch('mu.logic.save_and_encode') as mock_save:
+        ed.save()
+    mock_save.assert_called_once_with(text, path, newline)
+    ed._view.get_save_path.call_count == 0
+
+
+def test_get_tab_existing_tab():
+    """
+    Ensure that an existing tab is returned if its path matches.
+    """
+    view = mock.MagicMock()
+    mock_tab = mock.MagicMock()
+    mock_tab.path = 'foo'
+    view.widgets = [mock_tab, ]
+    ed = mu.logic.Editor(view)
+    view.focus_tab.reset_mock()
+    tab = ed.get_tab('foo')
+    assert tab == mock_tab
+    view.focus_tab.assert_called_once_with(mock_tab)
+
+
+def test_get_tab_new_tab():
+    """
+    If the path is not represented by an existing tab, ensure it is loaded and
+    the new tab is returned.
+    """
+    view = mock.MagicMock()
+    mock_tab = mock.MagicMock()
+    mock_tab.path = 'foo'
+    view.widgets = [mock_tab, ]
+    ed = mu.logic.Editor(view)
+    ed.direct_load = mock.MagicMock()
+    tab = ed.get_tab('bar')
+    ed.direct_load.assert_called_once_with('bar')
+    assert tab == view.current_tab
 
 
 def test_zoom_in():
@@ -1029,26 +1255,69 @@ def test_zoom_out():
     assert view.zoom_out.call_count == 1
 
 
-def test_check_code():
+def test_check_code_on():
     """
     Checking code correctly results in something the UI layer can parse.
     """
     view = mock.MagicMock()
     tab = mock.MagicMock()
+    tab.has_annotations = False
     tab.path = 'foo.py'
     tab.text.return_value = 'import this\n'
     view.current_tab = tab
     flake = {2: {'line_no': 2, 'message': 'a message', }, }
     pep8 = {2: [{'line_no': 2, 'message': 'another message', }],
             3: [{'line_no': 3, 'message': 'yet another message', }]}
+    mock_mode = mock.MagicMock()
+    mock_mode.builtins = None
     with mock.patch('mu.logic.check_flake', return_value=flake), \
             mock.patch('mu.logic.check_pycodestyle', return_value=pep8):
         ed = mu.logic.Editor(view)
+        ed.modes = {'python': mock_mode, }
         ed.check_code()
+        assert tab.has_annotations is True
         view.reset_annotations.assert_called_once_with()
         view.annotate_code.assert_has_calls([mock.call(flake, 'error'),
                                              mock.call(pep8, 'style')],
                                             any_order=True)
+
+
+def test_check_code_no_problems():
+    """
+    If no problems are found in the code, ensure a status message is shown to
+    the user to confirm the fact. See #337
+    """
+    view = mock.MagicMock()
+    tab = mock.MagicMock()
+    tab.has_annotations = False
+    tab.path = 'foo.py'
+    tab.text.return_value = 'import this\n'
+    view.current_tab = tab
+    flake = {}
+    pep8 = {}
+    mock_mode = mock.MagicMock()
+    mock_mode.builtins = None
+    with mock.patch('mu.logic.check_flake', return_value=flake), \
+            mock.patch('mu.logic.check_pycodestyle', return_value=pep8):
+        ed = mu.logic.Editor(view)
+        ed.show_status_message = mock.MagicMock()
+        ed.modes = {'python': mock_mode, }
+        ed.check_code()
+        assert ed.show_status_message.call_count == 1
+
+
+def test_check_code_off():
+    """
+    If the tab already has annotations, toggle them off.
+    """
+    view = mock.MagicMock()
+    tab = mock.MagicMock()
+    tab.has_annotations = True
+    view.current_tab = tab
+    ed = mu.logic.Editor(view)
+    ed.check_code()
+    assert tab.has_annotations is False
+    view.reset_annotations.assert_called_once_with()
 
 
 def test_check_code_no_tab():
@@ -1069,10 +1338,13 @@ def test_show_help():
     """
     view = mock.MagicMock()
     ed = mu.logic.Editor(view)
-    with mock.patch('mu.logic.webbrowser.open_new', return_value=None) as wb:
+    with mock.patch('mu.logic.webbrowser.open_new', return_value=None) as wb, \
+            mock.patch('mu.logic.locale.getdefaultlocale',
+                       return_value=('en_GB', 'UTF-8')):
         ed.show_help()
-        wb.assert_called_once_with('http://codewith.mu/help/{}'.format(
-                                   __version__))
+        version = '.'.join(__version__.split('.')[:2])
+        url = 'https://codewith.mu/en/help/{}'.format(version)
+        wb.assert_called_once_with(url)
 
 
 def test_quit_modified_cancelled_from_button():
@@ -1127,6 +1399,17 @@ def test_quit_modified_ok():
     view.modified = True
     view.show_confirmation = mock.MagicMock(return_value=True)
     ed = mu.logic.Editor(view)
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = 'foo/bar'
+    mock_mode.get_hex_path.return_value = 'foo/bar'
+    mock_debug_mode = mock.MagicMock()
+    mock_debug_mode.is_debugger = True
+    ed.modes = {
+        'python': mock_mode,
+        'microbit': mock_mode,
+        'debugger': mock_debug_mode,
+    }
+    ed.mode = 'debugger'
     mock_open = mock.MagicMock()
     mock_open.return_value.__enter__ = lambda s: s
     mock_open.return_value.__exit__ = mock.Mock()
@@ -1136,9 +1419,10 @@ def test_quit_modified_ok():
     with mock.patch('sys.exit', return_value=None), \
             mock.patch('builtins.open', mock_open):
         ed.quit(mock_event)
+    mock_debug_mode.stop.assert_called_once_with()
     assert view.show_confirmation.call_count == 1
     assert mock_event.ignore.call_count == 0
-    assert mock_open.call_count == 2
+    assert mock_open.call_count == 1
     assert mock_open.return_value.write.call_count > 0
 
 
@@ -1154,6 +1438,13 @@ def test_quit_save_tabs_with_paths():
     w1.path = 'foo.py'
     view.widgets = [w1, ]
     ed = mu.logic.Editor(view)
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = 'foo/bar'
+    mock_mode.get_hex_path.return_value = 'foo/bar'
+    ed.modes = {
+        'python': mock_mode,
+        'microbit': mock_mode,
+    }
     mock_open = mock.MagicMock()
     mock_open.return_value.__enter__ = lambda s: s
     mock_open.return_value.__exit__ = mock.Mock()
@@ -1165,12 +1456,12 @@ def test_quit_save_tabs_with_paths():
         ed.quit(mock_event)
     assert view.show_confirmation.call_count == 1
     assert mock_event.ignore.call_count == 0
-    assert mock_open.call_count == 2
+    assert mock_open.call_count == 1
     assert mock_open.return_value.write.call_count > 0
     recovered = ''.join([i[0][0] for i
                         in mock_open.return_value.write.call_args_list])
     session = json.loads(recovered)
-    assert 'foo.py' in session['paths']
+    assert os.path.abspath('foo.py') in session['paths']
 
 
 def test_quit_save_theme():
@@ -1185,6 +1476,13 @@ def test_quit_save_theme():
     view.widgets = [w1, ]
     ed = mu.logic.Editor(view)
     ed.theme = 'night'
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = 'foo/bar'
+    mock_mode.get_hex_path.return_value = 'foo/bar'
+    ed.modes = {
+        'python': mock_mode,
+        'microbit': mock_mode,
+    }
     mock_open = mock.MagicMock()
     mock_open.return_value.__enter__ = lambda s: s
     mock_open.return_value.__exit__ = mock.Mock()
@@ -1196,12 +1494,55 @@ def test_quit_save_theme():
         ed.quit(mock_event)
     assert view.show_confirmation.call_count == 1
     assert mock_event.ignore.call_count == 0
-    assert mock_open.call_count == 2
+    assert mock_open.call_count == 1
     assert mock_open.return_value.write.call_count > 0
     recovered = ''.join([i[0][0] for i
                         in mock_open.return_value.write.call_args_list])
     session = json.loads(recovered)
     assert session['theme'] == 'night'
+
+
+def test_quit_save_envars():
+    """
+    When saving the session, ensure the user defined envars are logged in the
+    session file.
+    """
+    view = mock.MagicMock()
+    view.modified = True
+    view.show_confirmation = mock.MagicMock(return_value=True)
+    w1 = mock.MagicMock()
+    w1.path = 'foo.py'
+    view.widgets = [w1, ]
+    ed = mu.logic.Editor(view)
+    ed.theme = 'night'
+    mock_mode = mock.MagicMock()
+    mock_mode.workspace_dir.return_value = 'foo/bar'
+    mock_mode.get_hex_path.return_value = 'foo/bar'
+    ed.modes = {
+        'python': mock_mode,
+        'microbit': mock_mode,
+    }
+    ed.envars = [
+        ['name1', 'value1'],
+        ['name2', 'value2'],
+    ]
+    mock_open = mock.MagicMock()
+    mock_open.return_value.__enter__ = lambda s: s
+    mock_open.return_value.__exit__ = mock.Mock()
+    mock_open.return_value.write = mock.MagicMock()
+    mock_event = mock.MagicMock()
+    mock_event.ignore = mock.MagicMock(return_value=None)
+    with mock.patch('sys.exit', return_value=None), \
+            mock.patch('builtins.open', mock_open):
+        ed.quit(mock_event)
+    assert view.show_confirmation.call_count == 1
+    assert mock_event.ignore.call_count == 0
+    assert mock_open.call_count == 1
+    assert mock_open.return_value.write.call_count > 0
+    recovered = ''.join([i[0][0] for i
+                        in mock_open.return_value.write.call_args_list])
+    session = json.loads(recovered)
+    assert session['envars'] == [['name1', 'value1'], ['name2', 'value2'], ]
 
 
 def test_quit_calls_sys_exit():
@@ -1216,6 +1557,10 @@ def test_quit_calls_sys_exit():
     view.widgets = [w1, ]
     ed = mu.logic.Editor(view)
     ed.theme = 'night'
+    ed.modes = {
+        'python': mock.MagicMock(),
+        'microbit': mock.MagicMock(),
+    }
     mock_open = mock.MagicMock()
     mock_open.return_value.__enter__ = lambda s: s
     mock_open.return_value.__exit__ = mock.Mock()
@@ -1226,3 +1571,619 @@ def test_quit_calls_sys_exit():
             mock.patch('builtins.open', mock_open):
         ed.quit(mock_event)
     ex.assert_called_once_with(0)
+
+
+def test_show_admin():
+    """
+    Ensure the expected admin dialog is displayed to the end user.
+    """
+    view = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    ed.envars = [['name', 'value'], ]
+    mock_open = mock.mock_open()
+    with mock.patch('builtins.open', mock_open):
+        ed.show_admin(None)
+        mock_open.assert_called_once_with(mu.logic.LOG_FILE, 'r')
+        assert view.show_admin.call_count == 1
+        assert view.show_admin.call_args[0][1] == 'name=value'
+
+
+def test_select_mode():
+    """
+    It's possible to select and update to a new mode.
+    """
+    view = mock.MagicMock()
+    view.select_mode.return_value = 'foo'
+    mode = mock.MagicMock()
+    mode.is_debugger = False
+    ed = mu.logic.Editor(view)
+    ed.modes = {
+        'python': mode,
+    }
+    ed.change_mode = mock.MagicMock()
+    ed.select_mode(None)
+    assert view.select_mode.call_count == 1
+    assert ed.mode == 'foo'
+    ed.change_mode.assert_called_once_with('foo')
+
+
+def test_select_mode_debug_mode():
+    """
+    It's NOT possible to select and update to a new mode if you're in debug
+    mode.
+    """
+    view = mock.MagicMock()
+    mode = mock.MagicMock()
+    mode.debugger = True
+    ed = mu.logic.Editor(view)
+    ed.modes = {
+        'debugger': mode,
+    }
+    ed.mode = 'debugger'
+    ed.change_mode = mock.MagicMock()
+    ed.select_mode(None)
+    assert ed.mode == 'debugger'
+    assert ed.change_mode.call_count == 0
+
+
+def test_change_mode():
+    """
+    It should be possible to change modes in the expected fashion (buttons get
+    correctly connected to event handlers).
+    """
+    view = mock.MagicMock()
+    mock_button_bar = mock.MagicMock()
+    view.button_bar = mock_button_bar
+    view.change_mode = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    mode = mock.MagicMock()
+    mode.save_timeout = 5
+    mode.actions.return_value = [
+        {
+            'name': 'name',
+            'handler': 'handler',
+            'shortcut': 'Ctrl+X',
+        },
+    ]
+    ed.modes = {
+        'python': mode,
+    }
+    ed.change_mode('python')
+    view.change_mode.assert_called_once_with(mode)
+    assert mock_button_bar.connect.call_count == 11
+    view.status_bar.set_mode.assert_called_once_with('python')
+    view.set_timer.assert_called_once_with(5, ed.autosave)
+
+
+def test_change_mode_no_timer():
+    """
+    It should be possible to change modes in the expected fashion (buttons get
+    correctly connected to event handlers).
+    """
+    view = mock.MagicMock()
+    mock_button_bar = mock.MagicMock()
+    view.button_bar = mock_button_bar
+    view.change_mode = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    mode = mock.MagicMock()
+    mode.save_timeout = 0
+    mode.actions.return_value = [
+        {
+            'name': 'name',
+            'handler': 'handler',
+            'shortcut': 'Ctrl+X',
+        },
+    ]
+    ed.modes = {
+        'python': mode,
+    }
+    ed.change_mode('python')
+    view.change_mode.assert_called_once_with(mode)
+    assert mock_button_bar.connect.call_count == 11
+    view.status_bar.set_mode.assert_called_once_with('python')
+    view.stop_timer.assert_called_once_with()
+
+
+def test_change_mode_reset_breakpoints():
+    """
+    When changing modes, if the new mode does NOT require a debugger, then
+    breakpoints should be reset.
+    """
+    view = mock.MagicMock()
+    mock_tab = mock.MagicMock()
+    mock_tab.breakpoint_lines = set([1, 2, 3, ])
+    view.widgets = [mock_tab, ]
+    ed = mu.logic.Editor(view)
+    mode = mock.MagicMock()
+    mode.has_debugger = False
+    mode.is_debugger = False
+    mode.save_timeout = 5
+    ed.modes = {
+        'microbit': mode,
+    }
+    ed.change_mode('microbit')
+    assert mock_tab.breakpoint_lines == set()
+    mock_tab.reset_annotations.assert_called_once_with()
+
+
+def test_autosave():
+    """
+    Ensure the autosave callback does the expected things to the tabs.
+    """
+    view = mock.MagicMock()
+    view.modified = True
+    mock_tab = mock.MagicMock()
+    mock_tab.path = 'foo'
+    mock_tab.isModified.return_value = True
+    view.widgets = [mock_tab, ]
+    ed = mu.logic.Editor(view)
+    with mock.patch('mu.logic.save_and_encode') as mock_save:
+        ed.autosave()
+    assert mock_save.call_count == 1
+    mock_tab.setModified.assert_called_once_with(False)
+
+
+def test_check_usb():
+    """
+    Ensure the check_usb callback actually checks for connected USB devices.
+    """
+    view = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    mode = mock.MagicMock()
+    mode.find_device.return_value = '/dev/ttyUSB0'
+    ed.modes = {
+        'microbit': mode,
+    }
+    ed.show_status_message = mock.MagicMock()
+    ed.check_usb()
+    expected = ("Connection from a new device detected. "
+                "Please switch to Microbit mode.")
+    ed.show_status_message.assert_called_once_with(expected)
+
+
+def test_show_status_message():
+    """
+    Ensure the method calls the status_bar in the view layer.
+    """
+    msg = "Hello, World!"
+    view = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    ed.show_status_message(msg, 8)
+    view.status_bar.set_message.assert_called_once_with(msg, 8000)
+
+
+def test_debug_toggle_breakpoint_as_debugger():
+    """
+    If a breakpoint is toggled in debug mode, pass it to the toggle_breakpoint
+    method in the debug client.
+    """
+    view = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    mock_debugger = mock.MagicMock()
+    mock_debugger.has_debugger = False
+    mock_debugger.is_debugger = True
+    ed.modes = {
+        'debugger': mock_debugger,
+    }
+    ed.mode = 'debugger'
+    ed.debug_toggle_breakpoint(1, 10, False)
+    mock_debugger.toggle_breakpoint.assert_called_once_with(10,
+                                                            view.current_tab)
+
+
+def test_debug_toggle_breakpoint_on():
+    """
+    Toggle the breakpoint on when not in debug mode by tracking it in the
+    tab.breakpoint_lines set.
+    """
+    view = mock.MagicMock()
+    view.current_tab.breakpoint_lines = set()
+    ed = mu.logic.Editor(view)
+    mock_debugger = mock.MagicMock()
+    mock_debugger.has_debugger = True
+    mock_debugger.is_debugger = False
+    ed.modes = {
+        'python': mock_debugger,
+    }
+    ed.mode = 'python'
+    ed.debug_toggle_breakpoint(1, 10, False)
+    view.current_tab.markerAdd.\
+        assert_called_once_with(10, view.current_tab.BREAKPOINT_MARKER)
+    assert 10 in view.current_tab.breakpoint_lines
+
+
+def test_debug_toggle_breakpoint_off():
+    """
+    Toggle the breakpoint off when not in debug mode by tracking it in the
+    tab.breakpoint_lines set.
+    """
+    view = mock.MagicMock()
+    view.current_tab.breakpoint_lines = set([10, ])
+    ed = mu.logic.Editor(view)
+    mock_debugger = mock.MagicMock()
+    mock_debugger.has_debugger = True
+    mock_debugger.is_debugger = False
+    ed.modes = {
+        'python': mock_debugger,
+    }
+    ed.mode = 'python'
+    ed.debug_toggle_breakpoint(1, 10, False)
+    view.current_tab.markerDelete.\
+        assert_called_once_with(10, view.current_tab.BREAKPOINT_MARKER)
+    assert len(view.current_tab.breakpoint_lines) == 0
+
+
+def test_rename_tab_no_tab_id():
+    """
+    If no tab id is supplied (i.e. this method was triggered by the shortcut
+    instead of the double-click event), then use the tab currently in focus.
+    """
+    view = mock.MagicMock()
+    view.get_save_path.return_value = 'foo'
+    mock_tab = mock.MagicMock()
+    mock_tab.path = 'old.py'
+    view.current_tab = mock_tab
+    ed = mu.logic.Editor(view)
+    ed.save = mock.MagicMock()
+    ed.rename_tab()
+    view.get_save_path.assert_called_once_with('old.py')
+    assert mock_tab.path == 'foo.py'
+    ed.save.assert_called_once_with()
+
+
+def test_rename_tab():
+    """
+    If there's a tab id, the function being tested is reacting to a double-tap
+    so make sure the expected tab is grabbed from the view.
+    """
+    view = mock.MagicMock()
+    view.get_save_path.return_value = 'foo'
+    mock_tab = mock.MagicMock()
+    mock_tab.path = 'old.py'
+    view.tabs.widget.return_value = mock_tab
+    ed = mu.logic.Editor(view)
+    ed.save = mock.MagicMock()
+    ed.rename_tab(1)
+    view.get_save_path.assert_called_once_with('old.py')
+    view.tabs.widget.assert_called_once_with(1)
+    assert mock_tab.path == 'foo.py'
+    ed.save.assert_called_once_with()
+
+
+def test_rename_tab_avoid_duplicating_other_tab_name():
+    """
+    If the user attempts to rename the tab to a filename used by another tab
+    then show an error message and don't rename anything.
+    """
+    view = mock.MagicMock()
+    view.get_save_path.return_value = 'foo'
+    mock_other_tab = mock.MagicMock()
+    mock_other_tab.path = 'foo.py'
+    view.widgets = [mock_other_tab, ]
+    mock_tab = mock.MagicMock()
+    mock_tab.path = 'old.py'
+    view.tabs.widget.return_value = mock_tab
+    ed = mu.logic.Editor(view)
+    ed.rename_tab(1)
+    view.show_message.assert_called_once_with('Could not rename file.',
+                                              'A file of that name is already '
+                                              'open in Mu.')
+    assert mock_tab.path == 'old.py'
+
+
+def test_logic_independent_import_logic():
+    """
+    It should be possible to import the logic and app
+    modules from the mu package independently of each
+    other.
+    """
+    subprocess.run([sys.executable, "-c", "from mu import logic"], check=True)
+
+
+def test_logic_independent_import_app():
+    """
+    It should be possible to import the logic and app
+    modules from the mu package independently of each
+    other.
+    """
+    subprocess.run([sys.executable, "-c", "from mu import app"], check=True)
+
+
+#
+# Tests for newline detection
+# Mu should detect the majority newline convention
+# in a loaded file and use that convention when writing
+# the file out again. Internally all newlines are MU_NEWLINE
+#
+
+def test_read_newline_no_text():
+    """If the file being loaded is empty, use the platform default newline
+    """
+    with generate_python_file() as filepath:
+        text, newline = mu.logic.read_and_decode(filepath)
+        assert text.count("\r\n") == 0
+        assert newline == os.linesep
+
+
+def test_read_newline_all_unix():
+    """If the file being loaded has only the Unix convention, use that
+    """
+    with generate_python_file("abc\ndef") as filepath:
+        text, newline = mu.logic.read_and_decode(filepath)
+        assert text.count("\r\n") == 0
+        assert newline == "\n"
+
+
+def test_read_newline_all_windows():
+    """If the file being loaded has only the Windows convention, use that
+    """
+    with generate_python_file("abc\r\ndef") as filepath:
+        text, newline = mu.logic.read_and_decode(filepath)
+        assert text.count("\r\n") == 0
+        assert newline == "\r\n"
+
+
+def test_read_newline_most_unix():
+    """If the file being loaded has mostly the Unix convention, use that
+    """
+    with generate_python_file("\nabc\r\ndef\n") as filepath:
+        text, newline = mu.logic.read_and_decode(filepath)
+        assert text.count("\r\n") == 0
+        assert newline == "\n"
+
+
+def test_read_newline_most_windows():
+    """If the file being loaded has mostly the Windows convention, use that
+    """
+    with generate_python_file("\r\nabc\ndef\r\n") as filepath:
+        text, newline = mu.logic.read_and_decode(filepath)
+        assert text.count("\r\n") == 0
+        assert newline == "\r\n"
+
+
+def test_read_newline_equal_match():
+    """If the file being loaded has an equal number of Windows and
+    Unix newlines, use the platform default
+    """
+    with generate_python_file("\r\nabc\ndef") as filepath:
+        text, newline = mu.logic.read_and_decode(filepath)
+        assert text.count("\r\n") == 0
+        assert newline == os.linesep
+
+
+#
+# When writing Mu should honour the line-ending convention found inbound
+#
+def test_write_newline_to_unix():
+    """If the file had Unix newlines it should be saved with Unix newlines
+
+    (In principle this check is unnecessary as Unix newlines are currently
+    the Mu internal default; but we leave it here in case that situation
+    changes)
+    """
+    with generate_python_file() as filepath:
+        test_string = "\r\n".join("the cat sat on the mat".split())
+        mu.logic.save_and_encode(test_string, filepath, "\n")
+        with open(filepath, newline="") as f:
+            text = f.read()
+            assert text.count("\r\n") == 0
+            assert text.count("\n") == test_string.count("\r\n")
+
+
+def test_write_newline_to_windows():
+    """If the file had Windows newlines it should be saved with Windows
+    newlines
+    """
+    with generate_python_file() as filepath:
+        test_string = "\n".join("the cat sat on the mat".split())
+        mu.logic.save_and_encode(test_string, filepath, "\r\n")
+        with open(filepath, newline="") as f:
+            text = f.read()
+            assert len(re.findall("[^\r]\n", text)) == 0
+            assert text.count("\r\n") == test_string.count("\n")
+
+
+#
+# Generate a Unicode test string which includes all the usual
+# 7-bit characters but also an 8th-bit range which tends to
+# trip things up between encodings
+#
+BYTES_TEST_STRING = bytes(range(0x20, 0x80)) + bytes(range(0xa0, 0xff))
+UNICODE_TEST_STRING = BYTES_TEST_STRING.decode("iso-8859-1")
+
+
+#
+# Tests for encoding detection
+# Mu should detect:
+# - BOM (UTF8/16)
+# - Encoding cooke, eg # -*- coding: utf-8 -*-
+# - fallback to the platform default (locale.getpreferredencoding())
+#
+def test_read_utf8bom():
+    """Successfully decode from utf-8 encoded with BOM
+    """
+    with generate_python_file() as filepath:
+        with open(filepath, "w", encoding="utf-8-sig") as f:
+            f.write(UNICODE_TEST_STRING)
+        text, _ = mu.logic.read_and_decode(filepath)
+        assert text == UNICODE_TEST_STRING
+
+
+def test_read_utf16bebom():
+    """Successfully decode from utf-16 BE encoded with BOM
+    """
+    with generate_python_file() as filepath:
+        with open(filepath, "wb") as f:
+            f.write(codecs.BOM_UTF16_BE)
+            f.write(UNICODE_TEST_STRING.encode("utf-16-be"))
+        text, _ = mu.logic.read_and_decode(filepath)
+        assert text == UNICODE_TEST_STRING
+
+
+def test_read_utf16lebom():
+    """Successfully decode from utf-16 LE encoded with BOM
+    """
+    with generate_python_file() as filepath:
+        with open(filepath, "wb") as f:
+            f.write(codecs.BOM_UTF16_LE)
+            f.write(UNICODE_TEST_STRING.encode("utf-16-le"))
+        text, _ = mu.logic.read_and_decode(filepath)
+        assert text == UNICODE_TEST_STRING
+
+
+def test_read_encoding_cookie():
+    """Successfully decode from iso-8859-1 with an encoding cookie
+    """
+    encoding_cookie = ENCODING_COOKIE.replace(
+        mu.logic.ENCODING, "iso-8859-1")
+    test_string = encoding_cookie + UNICODE_TEST_STRING
+    with generate_python_file() as filepath:
+        with open(filepath, "wb") as f:
+            f.write(test_string.encode("iso-8859-1"))
+        text, _ = mu.logic.read_and_decode(filepath)
+        assert text == test_string
+
+
+def test_read_encoding_mu_default():
+    """Successfully decode from the mu default
+    """
+    test_string = UNICODE_TEST_STRING.encode(mu.logic.ENCODING)
+    with generate_python_file() as filepath:
+        with open(filepath, "wb") as f:
+            f.write(test_string)
+        text, _ = mu.logic.read_and_decode(filepath)
+        assert text == UNICODE_TEST_STRING
+
+
+def test_read_encoding_default():
+    """Successfully decode from the default locale
+    """
+    test_string = UNICODE_TEST_STRING.encode(locale.getpreferredencoding())
+    with generate_python_file() as filepath:
+        with open(filepath, "wb") as f:
+            f.write(test_string)
+        text, _ = mu.logic.read_and_decode(filepath)
+        assert text == UNICODE_TEST_STRING
+
+
+def test_read_encoding_unsuccessful():
+    """Fail to decode encoded text
+    """
+    #
+    # Have to work quite hard to produce text which will definitely
+    # fail to decode since UTF-8 and cp1252 (the default on this
+    # computer) will, between them, decode nearly anything!
+    #
+    with generate_python_file() as filepath:
+        with open(filepath, "wb") as f:
+            f.write(codecs.BOM_UTF8)
+            f.write(b"\xd8\x00")
+        with pytest.raises(UnicodeDecodeError):
+            text, _ = mu.logic.read_and_decode(filepath)
+
+
+#
+# When writing, if the text has an encoding cookie, then that encoding
+# should be used. Otherwise, UTF-8 should be used and no encoding cookie
+# added
+#
+def test_write_encoding_cookie_no_cookie():
+    """If the text has no cookie of its own utf-8 will be used
+    when saving and no cookie added
+    """
+    test_string = UNICODE_TEST_STRING
+    with generate_python_file() as filepath:
+        mu.logic.save_and_encode(test_string, filepath)
+        with open(filepath, encoding=mu.logic.ENCODING) as f:
+            for line in f:
+                assert line == test_string
+                break
+
+
+def test_write_encoding_cookie_existing_cookie():
+    """If the text has a encoding cookie of its own then that encoding will
+    be used when saving and no change made to the cookie
+    """
+    encoding = "iso-8859-1"
+    cookie = ENCODING_COOKIE.replace(mu.logic.ENCODING, encoding)
+    test_string = cookie + UNICODE_TEST_STRING
+    with generate_python_file() as filepath:
+        mu.logic.save_and_encode(test_string, filepath)
+        with open(filepath, encoding=encoding) as f:
+            assert next(f) == cookie
+            assert next(f) == UNICODE_TEST_STRING
+
+
+def test_write_invalid_codec():
+    """If an encoding cookie is present but specifies an unknown codec,
+    utf-8 will be used instead
+    """
+    encoding = "INVALID"
+    cookie = ENCODING_COOKIE.replace(mu.logic.ENCODING, encoding)
+    test_string = cookie + UNICODE_TEST_STRING
+    with generate_python_file() as filepath:
+        mu.logic.save_and_encode(test_string, filepath)
+        with open(filepath, encoding=mu.logic.ENCODING) as f:
+            assert next(f) == cookie
+            assert next(f) == UNICODE_TEST_STRING
+
+
+def test_handle_open_file():
+    """
+    Ensure on_open_file event handler fires as expected with the editor's
+    direct_load when the view's open_file signal is emitted.
+    """
+    class Dummy(QObject):
+        open_file = pyqtSignal(str)
+    view = Dummy()
+    edit = mu.logic.Editor(view)
+    m = mock.MagicMock()
+    edit.direct_load = m
+    view.open_file.emit('/test/path.py')
+    m.assert_called_once_with('/test/path.py')
+
+
+def test_load_cli():
+    """
+    Ensure loading paths specified from the command line works as expected.
+    """
+    mock_view = mock.MagicMock()
+    ed = mu.logic.Editor(mock_view)
+    m = mock.MagicMock()
+    ed.direct_load = m
+    ed.load_cli(['test.py'])
+    m.assert_called_once_with(os.path.abspath('test.py'))
+
+    m = mock.MagicMock()
+    ed.direct_load = m
+    ed.load_cli([5])
+    assert m.call_count == 0
+    assert mock_view.show_message.call_count == 1
+
+
+def test_abspath():
+    """
+    Ensure a set of unique absolute paths is returned, given a list of
+    arbitrary paths.
+    """
+    ed = mu.logic.Editor(mock.MagicMock())
+    paths = ['foo', 'bar', 'bar']
+    result = ed._abspath(paths)
+    assert len(result) == 2
+    assert os.path.abspath('foo') in result
+    assert os.path.abspath('bar') in result
+
+
+def test_abspath_fail():
+    """
+    If given a problematic arbitrary path, _abspath will log the problem but
+    continue to process the "good" paths.
+    """
+    ed = mu.logic.Editor(mock.MagicMock())
+    paths = ['foo', 'bar', 5, 'bar']
+    with mock.patch('mu.logic.logger.error') as mock_error:
+        result = ed._abspath(paths)
+        assert mock_error.call_count == 1
+    assert len(result) == 2
+    assert os.path.abspath('foo') in result
+    assert os.path.abspath('bar') in result
