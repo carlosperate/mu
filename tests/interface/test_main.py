@@ -694,7 +694,9 @@ def test_Window_add_micropython_repl():
         w.add_micropython_repl('COM0', 'Test REPL')
     mock_repl_class.assert_called_once_with(serial=w.serial, theme=w.theme)
     w.open_serial_link.assert_called_once_with('COM0')
-    w.serial.write.assert_called_once_with(b'\x03')
+    assert w.serial.write.call_count == 2
+    assert w.serial.write.call_args_list[0][0][0] == b'\x02'
+    assert w.serial.write.call_args_list[1][0][0] == b'\x03'
     w.data_received.connect.assert_called_once_with(mock_repl.process_bytes)
     w.add_repl.assert_called_once_with(mock_repl, 'Test REPL')
 
@@ -1097,7 +1099,7 @@ def test_Window_show_admin():
     """
     mock_admin_display = mock.MagicMock()
     mock_admin_box = mock.MagicMock()
-    mock_admin_box.envars.return_value = 'this is the expected result'
+    mock_admin_box.settings.return_value = 'this is the expected result'
     mock_admin_display.return_value = mock_admin_box
     with mock.patch('mu.interface.main.AdminDialog', mock_admin_display):
         w = mu.interface.main.Window()

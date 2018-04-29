@@ -88,14 +88,9 @@ def generate_python_file(text="", dirpath=None):
 
 
 @contextlib.contextmanager
-def generate_session(
-    theme="day",
-    mode="python",
-    file_contents=None,
-    filepath=None,
-    envars=[['name', 'value'], ],
-    **kwargs
-):
+def generate_session(theme="day", mode="python", file_contents=None,
+                     filepath=None, envars=[['name', 'value'], ], minify=False,
+                     microbit_runtime=None, **kwargs):
     """Generate a temporary session file for one test
 
     By default, the session file will be created inside a temporary directory
@@ -133,6 +128,10 @@ def generate_session(
         session_data['paths'] = list(paths)
     if envars:
         session_data['envars'] = envars
+    if minify is not None:
+        session_data['minify'] = minify
+    if microbit_runtime:
+        session_data['microbit_runtime'] = microbit_runtime
     session_data.update(**kwargs)
 
     if filepath is None:
@@ -630,21 +629,44 @@ def test_editor_setup():
     assert e.modes == mock_modes
 
 
-def test_editor_restore_session():
+def test_editor_restore_session_existing_runtime():
     """
     A correctly specified session is restored properly.
     """
     mode, theme = "python", "night"
     file_contents = ["", ""]
     ed = mocked_editor(mode)
+    with mock.patch('os.path.isfile', return_value=True):
+        with generate_session(theme, mode, file_contents,
+                              microbit_runtime='/foo'):
+            ed.restore_session()
 
-    with generate_session(theme, mode, file_contents):
+    assert ed.theme == theme
+    assert ed._view.add_tab.call_count == len(file_contents)
+    ed._view.set_theme.assert_called_once_with(theme)
+    assert ed.envars == [['name', 'value'], ]
+    assert ed.minify is False
+    assert ed.microbit_runtime == '/foo'
+
+
+def test_editor_restore_session_missing_runtime():
+    """
+    If the referenced microbit_runtime file doesn't exist, reset to '' so Mu
+    uses the built-in runtime.
+    """
+    mode, theme = "python", "night"
+    file_contents = ["", ""]
+    ed = mocked_editor(mode)
+
+    with generate_session(theme, mode, file_contents, microbit_runtime='/foo'):
         ed.restore_session()
 
     assert ed.theme == theme
     assert ed._view.add_tab.call_count == len(file_contents)
     ed._view.set_theme.assert_called_once_with(theme)
     assert ed.envars == [['name', 'value'], ]
+    assert ed.minify is False
+    assert ed.microbit_runtime == ''  # File does not exist so set to ''
 
 
 def test_editor_restore_session_missing_files():
@@ -1580,12 +1602,55 @@ def test_show_admin():
     view = mock.MagicMock()
     ed = mu.logic.Editor(view)
     ed.envars = [['name', 'value'], ]
+    ed.minify = True
+    ed.microbit_runtime = '/foo/bar'
+    settings = {
+        'envars': 'name=value',
+        'minify': True,
+        'microbit_runtime': '/foo/bar'
+    }
+    view.show_admin.return_value = settings
     mock_open = mock.mock_open()
-    with mock.patch('builtins.open', mock_open):
+    with mock.patch('builtins.open', mock_open), \
+            mock.patch('os.path.isfile', return_value=True):
         ed.show_admin(None)
-        mock_open.assert_called_once_with(mu.logic.LOG_FILE, 'r')
+        mock_open.assert_called_once_with(mu.logic.LOG_FILE, 'r',
+                                          encoding='utf8')
         assert view.show_admin.call_count == 1
-        assert view.show_admin.call_args[0][1] == 'name=value'
+        assert view.show_admin.call_args[0][1] == settings
+        assert ed.envars == [['name', 'value']]
+        assert ed.minify is True
+        assert ed.microbit_runtime == '/foo/bar'
+
+
+def test_show_admin_missing_microbit_runtime():
+    """
+    Ensure the microbit_runtime result is '' and a warning message is displayed
+    if the specified microbit_runtime doesn't actually exist.
+    """
+    view = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    ed.envars = [['name', 'value'], ]
+    ed.minify = True
+    ed.microbit_runtime = '/foo/bar'
+    settings = {
+        'envars': 'name=value',
+        'minify': True,
+        'microbit_runtime': '/foo/bar'
+    }
+    view.show_admin.return_value = settings
+    mock_open = mock.mock_open()
+    with mock.patch('builtins.open', mock_open), \
+            mock.patch('os.path.isfile', return_value=False):
+        ed.show_admin(None)
+        mock_open.assert_called_once_with(mu.logic.LOG_FILE, 'r',
+                                          encoding='utf8')
+        assert view.show_admin.call_count == 1
+        assert view.show_admin.call_args[0][1] == settings
+        assert ed.envars == [['name', 'value']]
+        assert ed.minify is True
+        assert ed.microbit_runtime == ''
+        assert view.show_message.call_count == 1
 
 
 def test_select_mode():
@@ -1603,7 +1668,6 @@ def test_select_mode():
     ed.change_mode = mock.MagicMock()
     ed.select_mode(None)
     assert view.select_mode.call_count == 1
-    assert ed.mode == 'foo'
     ed.change_mode.assert_called_once_with('foo')
 
 
@@ -1649,6 +1713,7 @@ def test_change_mode():
         'python': mode,
     }
     ed.change_mode('python')
+    assert ed.mode == 'python'
     view.change_mode.assert_called_once_with(mode)
     assert mock_button_bar.connect.call_count == 11
     view.status_bar.set_mode.assert_called_once_with('python')
@@ -1678,6 +1743,7 @@ def test_change_mode_no_timer():
         'python': mode,
     }
     ed.change_mode('python')
+    assert ed.mode == 'python'
     view.change_mode.assert_called_once_with(mode)
     assert mock_button_bar.connect.call_count == 11
     view.status_bar.set_mode.assert_called_once_with('python')
@@ -1702,6 +1768,7 @@ def test_change_mode_reset_breakpoints():
         'microbit': mode,
     }
     ed.change_mode('microbit')
+    assert ed.mode == 'microbit'
     assert mock_tab.breakpoint_lines == set()
     mock_tab.reset_annotations.assert_called_once_with()
 
@@ -1728,17 +1795,109 @@ def test_check_usb():
     Ensure the check_usb callback actually checks for connected USB devices.
     """
     view = mock.MagicMock()
+    view.show_confirmation = mock.MagicMock(return_value=QMessageBox.Ok)
     ed = mu.logic.Editor(view)
-    mode = mock.MagicMock()
-    mode.find_device.return_value = '/dev/ttyUSB0'
+    ed.change_mode = mock.MagicMock()
+    mode_mb = mock.MagicMock()
+    mode_mb.name = 'BBC micro:bit'
+    mode_mb.find_device.return_value = '/dev/ttyUSB0'
     ed.modes = {
-        'microbit': mode,
+        'microbit': mode_mb,
     }
     ed.show_status_message = mock.MagicMock()
     ed.check_usb()
-    expected = ("Connection from a new device detected. "
-                "Please switch to Microbit mode.")
-    ed.show_status_message.assert_called_once_with(expected)
+    expected = 'Detected new BBC micro:bit device.'
+    ed.show_status_message.assert_called_with(expected)
+    assert view.show_confirmation.called
+    ed.change_mode.assert_called_once_with('microbit')
+
+
+def test_check_usb_change_mode_cancel():
+    """
+    Ensure the check_usb doesn't change mode if confirmation cancelled by user.
+    """
+    view = mock.MagicMock()
+    view.show_confirmation = mock.MagicMock(return_value=QMessageBox.Cancel)
+    ed = mu.logic.Editor(view)
+    ed.change_mode = mock.MagicMock()
+    mode_cp = mock.MagicMock()
+    mode_cp.name = 'CircuitPlayground'
+    mode_cp.find_device.return_value = '/dev/ttyUSB1'
+    ed.modes = {
+        'circuitplayground': mode_cp,
+    }
+    ed.show_status_message = mock.MagicMock()
+    ed.check_usb()
+    expected = 'Detected new CircuitPlayground device.'
+    ed.show_status_message.assert_called_with(expected)
+    assert view.show_confirmation.called
+    ed.change_mode.assert_not_called()
+
+
+def test_check_usb_already_in_mode():
+    """
+    Ensure the check_usb doesn't ask to change mode if already selected.
+    """
+    view = mock.MagicMock()
+    view.show_confirmation = mock.MagicMock(return_value=QMessageBox.Ok)
+    ed = mu.logic.Editor(view)
+    ed.change_mode = mock.MagicMock()
+    mode_mb = mock.MagicMock()
+    mode_mb.name = 'BBC micro:bit'
+    mode_mb.find_device.return_value = '/dev/ttyUSB0'
+    mode_cp = mock.MagicMock()
+    mode_cp.find_device.return_value = None
+    ed.modes = {
+        'microbit': mode_mb,
+        'circuitplayground': mode_cp
+    }
+    ed.mode = 'microbit'
+    ed.show_status_message = mock.MagicMock()
+    ed.check_usb()
+    view.show_confirmation.assert_not_called()
+    ed.change_mode.assert_not_called()
+
+
+def test_check_usb_multiple_devices():
+    """
+    Ensure the check_usb doesn't ask to change mode if multiple devices found.
+    """
+    view = mock.MagicMock()
+    view.show_confirmation = mock.MagicMock(return_value=QMessageBox.Ok)
+    ed = mu.logic.Editor(view)
+    ed.change_mode = mock.MagicMock()
+    mode_mb = mock.MagicMock()
+    mode_mb.name = 'BBC micro:bit'
+    mode_mb.find_device.return_value = '/dev/ttyUSB0'
+    mode_cp = mock.MagicMock()
+    mode_cp.name = 'CircuitPlayground'
+    mode_cp.find_device.return_value = '/dev/ttyUSB1'
+    ed.modes = {
+        'microbit': mode_mb,
+        'circuitplayground': mode_cp
+    }
+    ed.show_status_message = mock.MagicMock()
+    ed.check_usb()
+    expected_mb = mock.call('Detected new BBC micro:bit device.')
+    expected_cp = mock.call('Detected new CircuitPlayground device.')
+    ed.show_status_message.assert_has_calls((expected_mb, expected_cp),
+                                            any_order=True)
+    view.show_confirmation.assert_not_called()
+    ed.change_mode.assert_not_called()
+
+
+def test_check_usb_remove_disconnected_devices():
+    """
+    Ensure that if a device is no longer connected, it is removed from
+    the set of connected devices.
+    """
+    view = mock.MagicMock()
+    ed = mu.logic.Editor(view)
+    ed.modes = {}
+    ed.show_status_message = mock.MagicMock()
+    ed.connected_devices = {('microbit', '/dev/ttyACM1')}
+    ed.check_usb()
+    assert len(ed.connected_devices) == 0
 
 
 def test_show_status_message():

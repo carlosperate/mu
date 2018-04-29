@@ -551,6 +551,8 @@ class Editor:
         self.mode = 'python'
         self.modes = {}  # See set_modes.
         self.envars = []  # See restore session and show_admin
+        self.minify = False
+        self.microbit_runtime = ''
         self.connected_devices = set()
         if not os.path.exists(DATA_DIR):
             logger.debug('Creating directory: {}'.format(DATA_DIR))
@@ -639,6 +641,20 @@ class Editor:
                     self.envars = old_session['envars']
                     logger.info('User defined environment variables: '
                                 '{}'.format(self.envars))
+                if 'minify' in old_session:
+                    self.minify = old_session['minify']
+                    logger.info('Minify scripts on micro:bit? '
+                                '{}'.format(self.minify))
+                if 'microbit_runtime' in old_session:
+                    self.microbit_runtime = old_session['microbit_runtime']
+                    if self.microbit_runtime:
+                        logger.info('Custom micro:bit runtime path: '
+                                    '{}'.format(self.microbit_runtime))
+                        if not os.path.isfile(self.microbit_runtime):
+                            self.microbit_runtime = ''
+                            logger.warning('The specified micro:bit runtime '
+                                           'does not exist. Using default '
+                                           'runtime instead.')
         # handle os passed file last,
         # so it will not be focused over by another tab
         if paths and len(paths) > 0:
@@ -944,6 +960,8 @@ class Editor:
             'mode': self.mode,
             'paths': paths,
             'envars': self.envars,
+            'minify': self.minify,
+            'microbit_runtime': self.microbit_runtime,
         }
         session_path = get_session_path()
         with open(session_path, 'w') as out:
@@ -962,9 +980,26 @@ class Editor:
         logger.info('Showing logs from {}'.format(LOG_FILE))
         envars = '\n'.join(['{}={}'.format(name, value) for name, value in
                             self.envars])
-        with open(LOG_FILE, 'r') as logfile:
-            envars = self._view.show_admin(logfile.read(), envars, self.theme)
-            self.envars = extract_envars(envars)
+        settings = {
+            'envars': envars,
+            'minify': self.minify,
+            'microbit_runtime': self.microbit_runtime,
+        }
+        with open(LOG_FILE, 'r', encoding='utf8') as logfile:
+            new_settings = self._view.show_admin(logfile.read(), settings,
+                                                 self.theme)
+            self.envars = extract_envars(new_settings['envars'])
+            self.minify = new_settings['minify']
+            runtime = new_settings['microbit_runtime'].strip()
+            if runtime and not os.path.isfile(runtime):
+                self.microbit_runtime = ''
+                message = _('Could not find MicroPython runtime.')
+                information = _("The micro:bit runtime you specified ('{}') "
+                                "does not exist. "
+                                "Please try again.".format(runtime))
+                self._view.show_message(message, information)
+            else:
+                self.microbit_runtime = runtime
 
     def select_mode(self, event=None):
         """
@@ -975,17 +1010,16 @@ class Editor:
         logger.info('Showing available modes: {}'.format(
             list(self.modes.keys())))
         new_mode = self._view.select_mode(self.modes, self.mode, self.theme)
-        if new_mode and new_mode is not self.mode:
-            self.mode = new_mode
-            self.change_mode(self.mode)
-            self.show_status_message(_('Changed to {} mode.').format(
-                                     self.mode.capitalize()))
+        if new_mode and new_mode != self.mode:
+            logger.info('New mode selected: {}'.format(new_mode))
+            self.change_mode(new_mode)
 
     def change_mode(self, mode):
         """
         Given the name of a mode, will make the necessary changes to put the
         editor into the new mode.
         """
+        self.mode = mode
         # Remove the old mode's REPL.
         self._view.remove_repl()
         # Update buttons.
@@ -1020,6 +1054,8 @@ class Editor:
             for tab in self._view.widgets:
                 tab.breakpoint_lines = set()
                 tab.reset_annotations()
+        self.show_status_message(_('Changed to {} mode.').format(
+            mode.capitalize()))
 
     def autosave(self):
         """
@@ -1036,20 +1072,42 @@ class Editor:
         """
         Ensure connected USB devices are polled. If there's a change and a new
         recognised device is attached, inform the user via a status message.
+        If a single device is found and Mu is in a different mode ask the user
+        if they'd like to change mode.
         """
+        devices = []
+        device_types = set()
+        # Detect connected devices.
         for name, mode in self.modes.items():
-            if hasattr(mode, "find_device"):
+            if hasattr(mode, 'find_device'):
                 # The mode can detect an attached device.
-                device = mode.find_device(with_logging=False)
-                if device and (device, mode) not in self.connected_devices:
-                    self.connected_devices = set()
-                    self.connected_devices.add((device, mode))
-                    msg = _("Connection from a new device detected.")
-                    if self.mode != name:
-                        msg += _(" Please switch to {} mode.").format(
-                            name.capitalize())
-                    self.show_status_message(msg)
-                    break
+                port = mode.find_device(with_logging=False)
+                if port:
+                    devices.append((name, port))
+                    device_types.add(name)
+        # Remove no-longer connected devices.
+        to_remove = []
+        for connected in self.connected_devices:
+            if connected not in devices:
+                to_remove.append(connected)
+        for device in to_remove:
+            self.connected_devices.remove(device)
+        # Add newly connected devices.
+        for device in devices:
+            if device not in self.connected_devices:
+                self.connected_devices.add(device)
+                mode_name = device[0]
+                device_name = self.modes[mode_name].name
+                msg = _('Detected new {} device.').format(device_name)
+                self.show_status_message(msg)
+                # Only ask to switch mode if a single device type is connected
+                if len(device_types) == 1 and self.mode != mode_name:
+                    msg_body = _('Would you like to change Mu to the {} '
+                                 'mode?').format(device_name)
+                    change_confirmation = self._view.show_confirmation(
+                        msg, msg_body, icon='Question')
+                    if change_confirmation == QMessageBox.Ok:
+                        self.change_mode(mode_name)
 
     def show_status_message(self, message, duration=5):
         """
