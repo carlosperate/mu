@@ -34,17 +34,17 @@ before_install:
   - python3 -c "import sys; print(sys.executable)"
   - python3 -m pip --version
   - pip3 --version
-  - pip3 install virtualenv
-  - virtualenv venv --python=python3
-  - source venv/bin/activate
+  - pip3 install pipenv
+  - pipenv --three
 
 install:
+  - pipenv shell
   # Install Mu dependencies
   - pip3 install -r requirements.txt
   # Install packager for OSX
   - pip3 install briefcase
   # Install disk image maker for OSX
-  - pip3 install dmgbuild 
+  - pip3 install dmgbuild
   # Install helpful pytest plug-in
   - pip3 install pytest-faulthandler
   # Check everything was correctly installed
@@ -80,8 +80,7 @@ deploy:
   acl: public_read
   on:
     repo: mu-editor/mu
-    branch: [master, package_macos]
-    python: 3.6
+    branch: [master, package_macos_mine]
 
 notifications:
   email:
