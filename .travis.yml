@@ -61,7 +61,7 @@ script:
   #- if [ "$TRAVIS_OS_NAME" = "osx" ]; then sudo mkdir -p /lib/python3.6/site-packages/; fi
   - if [ "$TRAVIS_OS_NAME" = "osx" ]; then pipenv run python3 setup.py macos; fi
   - if [ "$TRAVIS_OS_NAME" = "osx" ]; then mkdir dist; fi
-  - if [ "$TRAVIS_OS_NAME" = "osx" ]; then dmgbuild -s package/dmg_settings.py "Mu Editor" dist/mu-editor.dmg; fi
+  - if [ "$TRAVIS_OS_NAME" = "osx" ]; then pipenv run dmgbuild -s package/dmg_settings.py "Mu Editor" dist/mu-editor.dmg; fi
   - if [ "$TRAVIS_OS_NAME" = "osx" ]; then du -sk dist/; fi
   - if [ "$TRAVIS_OS_NAME" = "osx" ]; then mv dist/mu-editor.dmg dist/mu-editor_$(date '+%Y-%m-%d_%H_%M')_${TRAVIS_BRANCH}_${TRAVIS_COMMIT:0:7}.dmg; fi
 
@@ -78,7 +78,7 @@ deploy:
   upload-dir: $TRAVIS_OS_NAME
   acl: public_read
   on:
-    repo: mu-editor/mu
+    repo: carlosperate/mu
     branch: [master, package_macos_mine]
     condition: $TRAVIS_OS_NAME = "osx"
 
