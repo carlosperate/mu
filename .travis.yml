@@ -51,6 +51,8 @@ before_install:
 install:
   # Install Mu and its dependencies
   - pip install .[dev]
+  # Install PyInstaller
+  - if [ "$TRAVIS_OS_NAME" = "linux" ]; then  pip3 install pyinstaller==3.3.1; fi
   # Check everything was correctly installed
   - pip freeze
 
@@ -60,8 +62,8 @@ script:
   - make clean
 
   # Package it in Linux with PyInstaller
-  - pyinstaller package/pyinstaller.spec
-  - du -sk dist/
+  - if [ "$TRAVIS_OS_NAME" = "linux" ]; then pyinstaller package/pyinstaller.spec; fi
+  - if [ "$TRAVIS_OS_NAME" = "linux" ]; then du -sk dist/; fi
   - if [ "$TRAVIS_OS_NAME" = "linux" ]; then mv dist/mu dist/mu_$(date '+%Y-%m-%d_%H_%M')_${TRAVIS_BRANCH}_${TRAVIS_COMMIT:0:7}.bin; fi
 
   # Run the tests on macOS and package it: "make macos" runs checks+tests first.
