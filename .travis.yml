@@ -59,6 +59,11 @@ script:
   - if [ "$TRAVIS_OS_NAME" = "linux" ]; then xvfb-run make check; fi
   - make clean
 
+  # Package it in Linux with PyInstaller
+  - pyinstaller package/pyinstaller.spec
+  - du -sk dist/
+  - if [ "$TRAVIS_OS_NAME" = "linux" ]; then mv dist/mu dist/mu_$(date '+%Y-%m-%d_%H_%M')_${TRAVIS_BRANCH}_${TRAVIS_COMMIT:0:7}.bin; fi
+
   # Run the tests on macOS and package it: "make macos" runs checks+tests first.
   - if [ "$TRAVIS_OS_NAME" = "osx" ]; then make macos; fi
   - if [ "$TRAVIS_OS_NAME" = "osx" ]; then mkdir dist; fi
@@ -81,7 +86,7 @@ deploy:
   on:
     repo: carlosperate/mu
     all_branches: true
-    condition: $TRAVIS_OS_NAME = "osx"
+    python: 3.6
 
 notifications:
   email:
