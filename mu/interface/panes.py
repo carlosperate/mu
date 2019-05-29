@@ -17,6 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 import sys
+import site
 import os
 import re
 import platform
@@ -25,16 +26,17 @@ import signal
 import string
 import bisect
 import os.path
-from PyQt5.QtCore import Qt, QProcess, QProcessEnvironment, pyqtSignal, QTimer
+from PyQt5.QtCore import (Qt, QProcess, QProcessEnvironment, pyqtSignal,
+                          QTimer, QUrl)
 from collections import deque
 from PyQt5.QtWidgets import (QMessageBox, QTextEdit, QFrame, QListWidget,
                              QGridLayout, QLabel, QMenu, QApplication,
                              QTreeView)
-from PyQt5.QtGui import QKeySequence, QTextCursor, QCursor, QPainter
+from PyQt5.QtGui import (QKeySequence, QTextCursor, QCursor, QPainter,
+                         QDesktopServices, QStandardItem)
 from qtconsole.rich_jupyter_widget import RichJupyterWidget
 from mu.interface.themes import Font
-from mu.interface.themes import (DEFAULT_FONT_SIZE, NIGHT_STYLE, DAY_STYLE,
-                                 CONTRAST_STYLE)
+from mu.interface.themes import DEFAULT_FONT_SIZE
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,17 @@ except ImportError:  # pragma: no cover
     logger.info('Unable to find QChart. Plotter button will not display.')
     QChartView = object
     CHARTS = False
+
+
+PANE_ZOOM_SIZES = {
+    'xs': 8,
+    's': 10,
+    'm': 14,
+    'l': 16,
+    'xl': 18,
+    'xxl': 24,
+    'xxxl': 28,
+}
 
 
 class JupyterREPLPane(RichJupyterWidget):
@@ -64,6 +77,9 @@ class JupyterREPLPane(RichJupyterWidget):
         self.console_height = 10
 
     def _append_plain_text(self, text, *args, **kwargs):
+        """
+        Ensures appended text is emitted as a signal with associated bytes.
+        """
         super()._append_plain_text(text, *args, **kwargs)
         self.on_append_text.emit(text.encode('utf-8'))
 
@@ -71,27 +87,15 @@ class JupyterREPLPane(RichJupyterWidget):
         """
         Sets the font size for all the textual elements in this pane.
         """
-        stylesheet = ("QWidget{font-size: " + str(new_size) +
-                      "pt; font-family: Monospace;}")
-        self.setStyleSheet(stylesheet)
+        font = self.font
+        font.setPointSize(new_size)
+        self._set_font(font)
 
-    def zoomIn(self, delta=2):
+    def set_zoom(self, size):
         """
-        Zoom in (increase) the size of the font by delta amount difference in
-        point size upto 34 points.
+        Set the current zoom level given the "t-shirt" size.
         """
-        old_size = self.font.pointSize()
-        new_size = min(old_size + delta, 34)
-        self.set_font_size(new_size)
-
-    def zoomOut(self, delta=2):
-        """
-        Zoom out (decrease) the size of the font by delta amount difference in
-        point size down to 4 points.
-        """
-        old_size = self.font.pointSize()
-        new_size = max(old_size - delta, 4)
-        self.set_font_size(new_size)
+        self.set_font_size(PANE_ZOOM_SIZES[size])
 
     def set_theme(self, theme):
         """
@@ -99,13 +103,10 @@ class JupyterREPLPane(RichJupyterWidget):
         """
         if theme == 'contrast':
             self.set_default_style(colors='nocolor')
-            self.setStyleSheet(CONTRAST_STYLE)
         elif theme == 'night':
             self.set_default_style(colors='nocolor')
-            self.setStyleSheet(NIGHT_STYLE)
         else:
             self.set_default_style()
-            self.setStyleSheet(DAY_STYLE)
 
     def setFocus(self):
         """
@@ -119,7 +120,7 @@ class MicroPythonREPLPane(QTextEdit):
     """
     REPL = Read, Evaluate, Print, Loop.
 
-    This widget represents a REPL client connected to a BBC micro:bit running
+    This widget represents a REPL client connected to a device running
     MicroPython.
 
     The device MUST be flashed with MicroPython for this to work.
@@ -143,7 +144,9 @@ class MicroPythonREPLPane(QTextEdit):
         """
         clipboard = QApplication.clipboard()
         if clipboard and clipboard.text():
-            self.serial.write(bytes(clipboard.text(), 'utf8'))
+            to_paste = clipboard.text().replace('\n', '\r').\
+                replace('\r\r', '\r')
+            self.serial.write(bytes(to_paste, 'utf8'))
 
     def context_menu(self):
         """
@@ -162,15 +165,7 @@ class MicroPythonREPLPane(QTextEdit):
         menu.exec_(QCursor.pos())
 
     def set_theme(self, theme):
-        """
-        Sets the theme / look for the REPL pane.
-        """
-        if theme == 'day':
-            self.setStyleSheet(DAY_STYLE)
-        elif theme == 'night':
-            self.setStyleSheet(NIGHT_STYLE)
-        else:
-            self.setStyleSheet(CONTRAST_STYLE)
+        pass
 
     def keyPressEvent(self, data):
         """
@@ -182,6 +177,8 @@ class MicroPythonREPLPane(QTextEdit):
         msg = bytes(data.text(), 'utf8')
         if key == Qt.Key_Backspace:
             msg = b'\b'
+        elif key == Qt.Key_Delete:
+            msg = b'\x1B[\x33\x7E'
         elif key == Qt.Key_Up:
             msg = b'\x1B[A'
         elif key == Qt.Key_Down:
@@ -234,37 +231,39 @@ class MicroPythonREPLPane(QTextEdit):
                 self.setTextCursor(tc)
             elif data[i] == 13:  # \r
                 pass
-            elif data[i] == 27 and data[i + 1] == 91:  # VT100 cursor: <Esc>[
+            elif len(data) > i + 1 and data[i] == 27 and data[i + 1] == 91:
+                # VT100 cursor detected: <Esc>[
                 i += 2  # move index to after the [
-                m = re.search(r'(?P<count>[\d]*)(?P<action>[ABCDK])',
-                              data[i:].decode('utf-8'))
+                regex = r'(?P<count>[\d]*)(;?[\d]*)*(?P<action>[ABCDKm])'
+                m = re.search(regex, data[i:].decode('utf-8'))
+                if m:
+                    # move to (almost) after control seq
+                    # (will ++ at end of loop)
+                    i += m.end() - 1
 
-                # move to (almost) after control seq (will ++ at end of loop)
-                i += m.end() - 1
+                    if m.group("count") == '':
+                        count = 1
+                    else:
+                        count = int(m.group("count"))
 
-                if m.group("count") == '':
-                    count = 1
-                else:
-                    count = int(m.group("count"))
-
-                if m.group("action") == "A":  # up
-                    tc.movePosition(QTextCursor.Up, n=count)
-                    self.setTextCursor(tc)
-                elif m.group("action") == "B":  # down
-                    tc.movePosition(QTextCursor.Down, n=count)
-                    self.setTextCursor(tc)
-                elif m.group("action") == "C":  # right
-                    tc.movePosition(QTextCursor.Right, n=count)
-                    self.setTextCursor(tc)
-                elif m.group("action") == "D":  # left
-                    tc.movePosition(QTextCursor.Left, n=count)
-                    self.setTextCursor(tc)
-                elif m.group("action") == "K":  # delete things
-                    if m.group("count") == "":  # delete to end of line
-                        tc.movePosition(QTextCursor.EndOfLine,
-                                        mode=QTextCursor.KeepAnchor)
-                        tc.removeSelectedText()
+                    if m.group("action") == "A":  # up
+                        tc.movePosition(QTextCursor.Up, n=count)
                         self.setTextCursor(tc)
+                    elif m.group("action") == "B":  # down
+                        tc.movePosition(QTextCursor.Down, n=count)
+                        self.setTextCursor(tc)
+                    elif m.group("action") == "C":  # right
+                        tc.movePosition(QTextCursor.Right, n=count)
+                        self.setTextCursor(tc)
+                    elif m.group("action") == "D":  # left
+                        tc.movePosition(QTextCursor.Left, n=count)
+                        self.setTextCursor(tc)
+                    elif m.group("action") == "K":  # delete things
+                        if m.group("count") == "":  # delete to end of line
+                            tc.movePosition(QTextCursor.EndOfLine,
+                                            mode=QTextCursor.KeepAnchor)
+                            tc.removeSelectedText()
+                            self.setTextCursor(tc)
             elif data[i] == 10:  # \n
                 tc.movePosition(QTextCursor.End)
                 self.setTextCursor(tc)
@@ -281,6 +280,55 @@ class MicroPythonREPLPane(QTextEdit):
         Clears the text of the REPL.
         """
         self.setText('')
+
+    def set_font_size(self, new_size=DEFAULT_FONT_SIZE):
+        """
+        Sets the font size for all the textual elements in this pane.
+        """
+        font = self.font()
+        font.setPointSize(new_size)
+        self.setFont(font)
+
+    def set_zoom(self, size):
+        """
+        Set the current zoom level given the "t-shirt" size.
+        """
+        self.set_font_size(PANE_ZOOM_SIZES[size])
+
+    def send_commands(self, commands):
+        """
+        Send commands to the REPL via raw mode.
+        """
+        raw_on = [  # Sequence of commands to get into raw mode.
+            b'\x02',
+            b'\r\x03',
+            b'\r\x03',
+            b'\r\x03',
+            b'\r\x01',
+        ]
+        newline = [b'print("\\n")\r', ]
+        commands = [c.encode('utf-8') + b'\r' for c in commands]
+        commands.append(b'\r')
+        commands.append(b'\x04')
+        raw_off = [
+            b'\x02',
+        ]
+        command_sequence = raw_on + newline + commands + raw_off
+        logger.info(command_sequence)
+        self.execute(command_sequence)
+
+    def execute(self, commands):
+        """
+        Execute a series of commands over a period of time (scheduling
+        remaining commands to be run in the next iteration of the event loop).
+        """
+        if commands:
+            command = commands[0]
+            logger.info('Sending command {}'.format(command))
+            self.serial.write(command)
+            remainder = commands[1:]
+            remaining_task = lambda commands=remainder: self.execute(commands)
+            QTimer.singleShot(2, remaining_task)
 
 
 class MuFileList(QListWidget):
@@ -305,9 +353,9 @@ class MuFileList(QListWidget):
         return msg.exec_() == QMessageBox.Ok
 
 
-class MicrobitFileList(MuFileList):
+class MicroPythonDeviceFileList(MuFileList):
     """
-    Represents a list of files on the micro:bit.
+    Represents a list of files on a MicroPython device.
     """
 
     put = pyqtSignal(str)
@@ -370,6 +418,7 @@ class LocalFileList(MuFileList):
     """
 
     get = pyqtSignal(str, str)
+    open_file = pyqtSignal(str)
 
     def __init__(self, home):
         super().__init__()
@@ -378,7 +427,7 @@ class LocalFileList(MuFileList):
 
     def dropEvent(self, event):
         source = event.source()
-        if isinstance(source, MicrobitFileList):
+        if isinstance(source, MicroPythonDeviceFileList):
             file_exists = self.findItems(source.currentItem().text(),
                                          Qt.MatchExactly)
             if not file_exists or \
@@ -403,6 +452,34 @@ class LocalFileList(MuFileList):
         self.set_message.emit(msg)
         self.list_files.emit()
 
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        local_filename = self.currentItem().text()
+        # Get the file extension
+        ext = os.path.splitext(local_filename)[1].lower()
+        open_internal_action = None
+        # Mu micro:bit mode only handles .py & .hex
+        if ext == '.py' or ext == '.hex':
+            open_internal_action = menu.addAction(_("Open in Mu"))
+        # Open outside Mu (things get meta if Mu is the default application)
+        open_action = menu.addAction(_("Open"))
+        action = menu.exec_(self.mapToGlobal(event.pos()))
+        if action == open_action:
+            # Get the file's path
+            path = os.path.join(self.home, local_filename)
+            logger.info("Opening {}".format(path))
+            msg = _("Opening '{}'").format(local_filename)
+            logger.info(msg)
+            self.set_message.emit(msg)
+            # Let Qt work out how to open it
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        elif action == open_internal_action:
+            logger.info("Open {} internally".format(local_filename))
+            # Get the file's path
+            path = os.path.join(self.home, local_filename)
+            # Send the signal bubbling up the tree
+            self.open_file.emit(path)
+
 
 class FileSystemPane(QFrame):
     """
@@ -414,17 +491,24 @@ class FileSystemPane(QFrame):
     set_message = pyqtSignal(str)
     set_warning = pyqtSignal(str)
     list_files = pyqtSignal()
+    open_file = pyqtSignal(str)
 
     def __init__(self, home):
         super().__init__()
         self.home = home
         self.font = Font().load()
-        microbit_fs = MicrobitFileList(home)
+        microbit_fs = MicroPythonDeviceFileList(home)
         local_fs = LocalFileList(home)
+
+        @local_fs.open_file.connect
+        def on_open_file(file):
+            # Bubble the signal up
+            self.open_file.emit(file)
+
         layout = QGridLayout()
         self.setLayout(layout)
         microbit_label = QLabel()
-        microbit_label.setText(_('Files on your micro:bit:'))
+        microbit_label.setText(_('Files on your device:'))
         local_label = QLabel()
         local_label.setText(_('Files on your computer:'))
         self.microbit_label = microbit_label
@@ -495,46 +579,38 @@ class FileSystemPane(QFrame):
         Fired when listing files fails.
         """
         self.show_warning(_("There was a problem getting the list of files on "
-                            "the micro:bit. Please check Mu's logs for "
+                            "the device. Please check Mu's logs for "
                             "technical information. Alternatively, try "
-                            "unplugging/plugging-in your micro:bit and/or "
+                            "unplugging/plugging-in your device and/or "
                             "restarting Mu."))
         self.disable()
 
-    def on_put_fail(self, microbit_filename):
+    def on_put_fail(self, filename):
         """
-        Fired when the referenced file cannot be copied onto the micro:bit.
+        Fired when the referenced file cannot be copied onto the device.
         """
         self.show_warning(_("There was a problem copying the file '{}' onto "
-                            "the micro:bit. Please check Mu's logs for "
-                            "technical information."))
+                            "the device. Please check Mu's logs for "
+                            "more information.").format(filename))
 
-    def on_delete_fail(self, microbit_filename):
+    def on_delete_fail(self, filename):
         """
-        Fired when a deletion on the micro:bit for the given file failed.
+        Fired when a deletion on the device for the given file failed.
         """
         self.show_warning(_("There was a problem deleting '{}' from the "
-                            "micro:bit. Please check Mu's logs for "
-                            "technical information."))
+                            "device. Please check Mu's logs for "
+                            "more information.").format(filename))
 
-    def on_get_fail(self, microbit_filename):
+    def on_get_fail(self, filename):
         """
-        Fired when getting the referenced file on the micro:bit failed.
+        Fired when getting the referenced file on the device failed.
         """
         self.show_warning(_("There was a problem getting '{}' from the "
-                            "micro:bit. Please check Mu's logs for "
-                            "technical information."))
+                            "device. Please check Mu's logs for "
+                            "more information.").format(filename))
 
     def set_theme(self, theme):
-        """
-        Sets the theme / look for the FileSystemPane.
-        """
-        if theme == 'day':
-            self.setStyleSheet(DAY_STYLE)
-        elif theme == 'night':
-            self.setStyleSheet(NIGHT_STYLE)
-        else:
-            self.setStyleSheet(CONTRAST_STYLE)
+        pass
 
     def set_font_size(self, new_size=DEFAULT_FONT_SIZE):
         """
@@ -546,23 +622,11 @@ class FileSystemPane(QFrame):
         self.microbit_fs.setFont(self.font)
         self.local_fs.setFont(self.font)
 
-    def zoomIn(self, delta=2):
+    def set_zoom(self, size):
         """
-        Zoom in (increase) the size of the font by delta amount difference in
-        point size upto 34 points.
+        Set the current zoom level given the "t-shirt" size.
         """
-        old_size = self.font.pointSize()
-        new_size = min(old_size + delta, 34)
-        self.set_font_size(new_size)
-
-    def zoomOut(self, delta=2):
-        """
-        Zoom out (decrease) the size of the font by delta amount difference in
-        point size down to 4 points.
-        """
-        old_size = self.font.pointSize()
-        new_size = max(old_size - delta, 4)
-        self.set_font_size(new_size)
+        self.set_font_size(PANE_ZOOM_SIZES[size])
 
 
 class PythonProcessPane(QTextEdit):
@@ -587,10 +651,12 @@ class PythonProcessPane(QTextEdit):
         self.input_history = []  # history of inputs entered in this session.
         self.start_of_current_line = 0  # start position of the input line.
         self.history_position = 0  # current position when navigation history.
+        self.stdout_buffer = b''  # contains non-decoded bytes from stdout.
+        self.reading_stdout = False  # flag showing if already reading stdout.
 
     def start_process(self, script_name, working_directory, interactive=True,
                       debugger=False, command_args=None, envars=None,
-                      runner=None):
+                      runner=None, python_args=None):
         """
         Start the child Python process.
 
@@ -610,9 +676,14 @@ class PythonProcessPane(QTextEdit):
         If there is a list of environment variables, these will be part of the
         context of the new child process.
 
-        If runner is give, this is used as the command to start the Python
+        If runner is given, this is used as the command to start the Python
         process.
+
+        If python_args is given, these are passed as arguments to the Python
+        runtime used to launch the child process.
         """
+        if not envars:  # Envars must be a list if not passed a value.
+            envars = []
         self.script = os.path.abspath(os.path.normcase(script_name))
         logger.info('Running script: {}'.format(self.script))
         if interactive:
@@ -625,6 +696,49 @@ class PythonProcessPane(QTextEdit):
         # Force buffers to flush immediately.
         env = QProcessEnvironment.systemEnvironment()
         env.insert('PYTHONUNBUFFERED', '1')
+        env.insert('PYTHONIOENCODING', 'utf-8')
+        if sys.platform == 'win32' and 'pythonw.exe' in sys.executable:
+            # On Windows, if installed via NSIS then Python is always run in
+            # isolated mode via pythonw.exe so none of the expected directories
+            # are on sys.path. To mitigate, Mu attempts to drop a mu.pth file
+            # in a location taken from Windows based settings. This file will
+            # contain the "other" directories to include on the Python path,
+            # such as the working_directory and, if different from the
+            # working_directory, the directory containing the script to run.
+            try:
+                if site.ENABLE_USER_SITE:
+                    # Ensure the USER_SITE directory exists.
+                    os.makedirs(site.getusersitepackages(), exist_ok=True)
+                    site_path = site.USER_SITE
+                    path_file = os.path.join(site_path, 'mu.pth')
+                    logger.info('Python paths set via {}'.format(path_file))
+                    # Copy current Python paths. Use a set to avoid
+                    # duplications.
+                    paths_to_use = set([os.path.normcase(p) for p in sys.path])
+                    # Add Mu's working directory.
+                    paths_to_use.add(os.path.normcase(working_directory))
+                    # Add the directory containing the script.
+                    paths_to_use.add(os.path.normcase(
+                        os.path.dirname(self.script)))
+                    # Dropping a mu.pth file containing the paths_to_use
+                    # into USER_SITE will add such paths to sys.path in the
+                    # child process.
+                    with open(path_file, 'w') as mu_pth:
+                        for p in paths_to_use:
+                            mu_pth.write(p + '\n')
+                else:
+                    logger.info("Unable to set Python paths."
+                                " Python's USER_SITE not enabled."
+                                " Check configuration with administrator.")
+            except Exception as ex:
+                # Log all possible errors and allow Mu to continue. This is a
+                # "best effort" attempt to add the correct paths to the child
+                # process, but sometimes configuration by sys-admins may cause
+                # this to fail.
+                logger.error('Could not set Python paths with mu.pth file.')
+                logger.error(ex)
+        if 'PYTHONPATH' not in envars:
+            envars.append(('PYTHONPATH', os.pathsep.join(sys.path)))
         if envars:
             logger.info('Running with environment variables: '
                         '{}'.format(envars))
@@ -633,13 +747,17 @@ class PythonProcessPane(QTextEdit):
         logger.info('Working directory: {}'.format(working_directory))
         self.process.setWorkingDirectory(working_directory)
         self.process.setProcessEnvironment(env)
-        self.process.readyRead.connect(self.read_from_stdout)
+        self.process.readyRead.connect(self.try_read_from_stdout)
         self.process.finished.connect(self.finished)
         logger.info('Python path: {}'.format(sys.path))
         if debugger:
             # Start the mu-debug runner for the script.
-            args = [self.script, ] + command_args
-            self.process.start('mu-debug', args)
+            parent_dir = os.path.join(os.path.dirname(__file__), '..')
+            mu_dir = os.path.abspath(parent_dir)
+            runner = os.path.join(mu_dir, 'mu-debug.py')
+            python_exec = sys.executable
+            args = [runner, self.script, ] + command_args
+            self.process.start(python_exec, args)
         else:
             if runner:
                 # Use the passed in Python "runner" to run the script.
@@ -653,6 +771,8 @@ class PythonProcessPane(QTextEdit):
             else:
                 # Just run the command with no additional flags.
                 args = [self.script, ] + command_args
+            if python_args:
+                args = python_args + args
             self.process.start(python_exec, args)
             self.running = True
 
@@ -710,7 +830,7 @@ class PythonProcessPane(QTextEdit):
         """
         character = text[0]  # the current character to process.
         remainder = text[1:]  # remaining characters to process in the future.
-        if character in string.printable:
+        if character.isprintable() or character in string.printable:
             if character == '\n' or character == '\r':
                 self.parse_input(Qt.Key_Enter, character, None)
             else:
@@ -730,6 +850,29 @@ class PythonProcessPane(QTextEdit):
         text = data.text()
         modifiers = data.modifiers()
         self.parse_input(key, text, modifiers)
+
+    def on_process_halt(self):
+        """
+        Called when the the user has manually halted a running process. Ensures
+        that the remaining data from the halted process's stdout is handled
+        properly.
+
+        When the process is halted the user is dropped into the Python prompt
+        and this method ensures the UI is updated in a clean, non-blocking
+        way.
+        """
+        data = self.process.readAll().data()
+        if data:
+            while True:
+                try:
+                    self.append(data)
+                    self.on_append_text.emit(data)
+                    self.set_start_of_current_line()
+                    break
+                except UnicodeDecodeError:
+                    # Discard problematic start byte and try again.
+                    # (This may be caused by a split in multi-byte characters).
+                    data = data[1:]
 
     def parse_input(self, key, text, modifiers):
         """
@@ -751,11 +894,21 @@ class PythonProcessPane(QTextEdit):
                 pid = self.process.processId()
                 # NOTE: Windows related constraints don't allow us to send a
                 # CTRL-C, rather, the process will just terminate.
+                halt_flag = False
                 if key == Qt.Key_C:
+                    halt_flag = True
                     os.kill(pid, signal.SIGINT)
                 if key == Qt.Key_D:
+                    halt_flag = True
                     self.process.kill()
-            return
+                if halt_flag:
+                    # Clean up from kill signal.
+                    self.process.readAll()  # Discard queued output.
+                    self.stdout_buffer = b''
+                    # Schedule update of the UI after the process halts (in
+                    # next iteration of the event loop).
+                    QTimer.singleShot(1, self.on_process_halt)
+                    return
         elif key == Qt.Key_Up:
             self.history_back()
         elif key == Qt.Key_Down:
@@ -788,7 +941,7 @@ class PythonProcessPane(QTextEdit):
                 self.copy()
             elif key == Qt.Key_V:
                 self.paste()
-        elif text in string.printable:
+        elif text.isprintable():
             # If the key is for a printable character then add it to the
             # active buffer and display it.
             msg = bytes(text, 'utf8')
@@ -796,16 +949,35 @@ class PythonProcessPane(QTextEdit):
             self.backspace()
         if key == Qt.Key_Delete:
             self.delete()
-        if not self.isReadOnly() and msg:
-            self.insert(msg)
         if key == Qt.Key_Enter or key == Qt.Key_Return:
+            # First move cursor to the end of the line and insert newline in
+            # case return/enter is pressed while the cursor is in the
+            # middle of the line
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.setTextCursor(cursor)
+            self.insert(msg)
+            # Then write line to std_in and add to history
             content = self.toPlainText()
             line = content[self.start_of_current_line:].encode('utf-8')
             self.write_to_stdin(line)
             if line.strip():
                 self.input_history.append(line.replace(b'\n', b''))
             self.history_position = 0
-            self.start_of_current_line = self.textCursor().position()
+            self.set_start_of_current_line()
+        elif not self.isReadOnly() and msg:
+            self.insert(msg)
+
+    def set_start_of_current_line(self):
+        """
+        Set the flag to indicate the start of the current line (used before
+        waiting for input).
+
+        This flag is used to discard the preceeding text in the text entry
+        field when Mu parses new input from the user (i.e. any text beyond the
+        self.start_of_current_line).
+        """
+        self.start_of_current_line = len(self.toPlainText())
 
     def history_back(self):
         """
@@ -837,16 +1009,32 @@ class PythonProcessPane(QTextEdit):
             history_item = self.input_history[history_pos]
             self.replace_input_line(history_item)
 
+    def try_read_from_stdout(self):
+        """
+        Ensure reading from stdout only happens if there is NOT already current
+        attempts to read from stdout.
+        """
+        if not self.reading_stdout:
+            self.reading_stdout = True
+            self.read_from_stdout()
+
     def read_from_stdout(self):
         """
         Process incoming data from the process's stdout.
         """
-        data = self.process.readAll().data()
+        data = self.process.read(256)
         if data:
-            self.append(data)
-            self.on_append_text.emit(data)
-            cursor = self.textCursor()
-            self.start_of_current_line = cursor.position()
+            data = self.stdout_buffer + data
+            try:
+                self.append(data)
+                self.on_append_text.emit(data)
+                self.set_start_of_current_line()
+                self.stdout_buffer = b''
+            except UnicodeDecodeError:
+                self.stdout_buffer = data
+            QTimer.singleShot(2, self.read_from_stdout)
+        else:
+            self.reading_stdout = False
 
     def write_to_stdin(self, data):
         """
@@ -912,36 +1100,28 @@ class PythonProcessPane(QTextEdit):
         self.clear_input_line()
         self.append(text)
 
-    def zoomIn(self, delta=2):
+    def set_font_size(self, new_size=DEFAULT_FONT_SIZE):
         """
-        Zoom in (increase) the size of the font by delta amount difference in
-        point size upto 34 points.
+        Sets the font size for all the textual elements in this pane.
         """
-        old_size = self.font().pointSize()
-        new_size = old_size + delta
-        if new_size <= 34:
-            super().zoomIn(delta)
+        f = self.font()
+        f.setPointSize(new_size)
+        self.setFont(f)
 
-    def zoomOut(self, delta=2):
+    def set_zoom(self, size):
         """
-        Zoom out (decrease) the size of the font by delta amount difference in
-        point size down to 4 points.
+        Set the current zoom level given the "t-shirt" size.
         """
-        old_size = self.font().pointSize()
-        new_size = old_size - delta
-        if new_size >= 4:
-            super().zoomOut(delta)
+        self.set_font_size(PANE_ZOOM_SIZES[size])
 
     def set_theme(self, theme):
-        """
-        Sets the theme / look for the REPL pane.
-        """
-        if theme == 'day':
-            self.setStyleSheet(DAY_STYLE)
-        elif theme == 'night':
-            self.setStyleSheet(NIGHT_STYLE)
-        else:
-            self.setStyleSheet(CONTRAST_STYLE)
+        pass
+
+
+class DebugInspectorItem(QStandardItem):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.setEditable(False)
 
 
 class DebugInspector(QTreeView):
@@ -949,6 +1129,11 @@ class DebugInspector(QTreeView):
     Presents a tree like representation of the current state of the call stack
     to the user.
     """
+
+    def __init__(self):
+        super().__init__()
+        self.setUniformRowHeights(True)
+        self.setSelectionBehavior(QTreeView.SelectRows)
 
     def set_font_size(self, new_size=DEFAULT_FONT_SIZE):
         """
@@ -958,34 +1143,14 @@ class DebugInspector(QTreeView):
                       "pt; font-family: Monospace;}")
         self.setStyleSheet(stylesheet)
 
-    def zoomIn(self, delta=2):
+    def set_zoom(self, size):
         """
-        Zoom in (increase) the size of the font by delta amount difference in
-        point size upto 34 points.
+        Set the current zoom level given the "t-shirt" size.
         """
-        old_size = self.font().pointSize()
-        new_size = min(old_size + delta, 34)
-        self.set_font_size(new_size)
-
-    def zoomOut(self, delta=2):
-        """
-        Zoom out (decrease) the size of the font by delta amount difference in
-        point size down to 4 points.
-        """
-        old_size = self.font().pointSize()
-        new_size = max(old_size - delta, 4)
-        self.set_font_size(new_size)
+        self.set_font_size(PANE_ZOOM_SIZES[size])
 
     def set_theme(self, theme):
-        """
-        Sets the theme / look for the debug inspector pane.
-        """
-        if theme == 'day':
-            self.setStyleSheet(DAY_STYLE)
-        elif theme == 'night':
-            self.setStyleSheet(NIGHT_STYLE)
-        else:
-            self.setStyleSheet(CONTRAST_STYLE)
+        pass
 
 
 class PlotterPane(QChartView):
@@ -999,7 +1164,7 @@ class PlotterPane(QChartView):
 
     data_flood = pyqtSignal()
 
-    def __init__(self, theme='day', parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         # Holds the raw input to be checked for actionable data to display.
         self.input_buffer = []

@@ -31,15 +31,13 @@ import random
 import locale
 import shutil
 import appdirs
+import site
 from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtCore import QLocale
 from pyflakes.api import check
-# Currently there is no pycodestyle deb packages, so fallback to old name
-try:  # pragma: no cover
-    from pycodestyle import StyleGuide, Checker
-except ImportError:  # pragma: no cover
-    from pep8 import StyleGuide, Checker
-from mu.contrib import uflash
+from pycodestyle import StyleGuide, Checker
 from mu.resources import path
+from mu.debugger.utils import is_breakpoint_line
 from mu import __version__
 
 
@@ -49,6 +47,9 @@ HOME_DIRECTORY = os.path.expanduser('~')
 WORKSPACE_NAME = 'mu_code'
 # The default directory for application data (i.e., configuration).
 DATA_DIR = appdirs.user_data_dir(appname='mu', appauthor='python')
+# The directory containing user installed third party modules.
+MODULE_DIR = os.path.join(DATA_DIR, 'site-packages')
+sys.path.append(MODULE_DIR)
 # The default directory for application logs.
 LOG_DIR = appdirs.user_log_dir(appname='mu', appauthor='python')
 # The path to the log file for the application.
@@ -146,6 +147,33 @@ ENCODING_COOKIE_RE = re.compile(
 logger = logging.getLogger(__name__)
 
 
+def installed_packages():
+    """
+    List all the third party modules installed by the user.
+    """
+    result = []
+    pkg_dirs = [os.path.join(MODULE_DIR, d) for d in os.listdir(MODULE_DIR)
+                if d.endswith("dist-info") or d.endswith("egg-info")]
+    logger.info("Packages found: {}".format(pkg_dirs))
+    for pkg in pkg_dirs:
+        if pkg.endswith("dist-info"):
+            # Modern.
+            metadata_file = os.path.join(pkg, 'METADATA')
+        else:
+            # Legacy (eggs).
+            metadata_file = os.path.join(pkg, 'PKG-INFO')
+        try:
+            with open(metadata_file, 'rb') as f:
+                lines = f.readlines()
+                name = lines[1].rsplit(b':')[-1].strip()
+                result.append(name.decode('utf-8'))
+        except Exception as ex:
+            # Just log any errors.
+            logger.error("Unable to get metadata for package: " + pkg)
+            logger.error(ex)
+    return sorted(result)
+
+
 def write_and_flush(fileobj, content):
     """
     Write content to the fileobj then flush and fsync to ensure the data is,
@@ -175,13 +203,15 @@ def save_and_encode(text, filepath, newline=os.linesep):
         try:
             codecs.lookup(encoding)
         except LookupError:
-            logger.warn("Invalid codec in encoding cookie: %s", encoding)
+            logger.warning("Invalid codec in encoding cookie: %s", encoding)
             encoding = ENCODING
     else:
         encoding = ENCODING
 
     with open(filepath, "w", encoding=encoding, newline='') as f:
-        write_and_flush(f, newline.join(text.splitlines()))
+        text_to_write = newline.join(l.rstrip(" ") for l in
+                                     text.splitlines()) + newline
+        write_and_flush(f, text_to_write)
 
 
 def sniff_encoding(filepath):
@@ -277,7 +307,7 @@ def read_and_decode(filepath):
             text = btext.decode(encoding)
             logger.info("Decoded with %s", encoding)
             break
-        except UnicodeDecodeError as exc:
+        except UnicodeDecodeError:
             continue
     else:
         raise UnicodeDecodeError(encoding, btext, 0, 0, "Unable to decode")
@@ -412,11 +442,10 @@ def check_pycodestyle(code):
     # the code.
     code_fd, code_filename = tempfile.mkstemp()
     os.close(code_fd)
-    with open(code_filename, 'w', newline='') as code_file:
-        write_and_flush(code_file, code)
+    save_and_encode(code, code_filename)
     # Configure which PEP8 rules to ignore.
-    ignore = ('E121', 'E123', 'E126', 'E226', 'E302', 'E305', 'E24', 'E704',
-              'W291', 'W292', 'W293', 'W391', 'W503', )
+    ignore = ('E121', 'E123', 'E126', 'E226', 'E203', 'E302', 'E305', 'E24',
+              'E704', 'W291', 'W292', 'W293', 'W391', 'W503', )
     style = StyleGuide(parse_argv=False, config_file=False)
     style.options.ignore = ignore
     checker = Checker(code_filename, options=style.options)
@@ -431,7 +460,6 @@ def check_pycodestyle(code):
     temp_out.seek(0)
     results = temp_out.read()
     temp_out.close()
-    code_file.close()
     os.remove(code_filename)
     # Parse the output from the tool into a dictionary of structured data.
     style_feedback = {}
@@ -554,9 +582,17 @@ class Editor:
         self.minify = False
         self.microbit_runtime = ''
         self.connected_devices = set()
+        self.find = ''
+        self.replace = ''
+        self.current_path = ''  # Directory of last loaded file.
+        self.global_replace = False
+        self.selecting_mode = False  # Flag to stop auto-detection of modes.
         if not os.path.exists(DATA_DIR):
             logger.debug('Creating directory: {}'.format(DATA_DIR))
             os.makedirs(DATA_DIR)
+        if not os.path.exists(MODULE_DIR):
+            logger.debug('Creating directory: {}'.format(MODULE_DIR))
+            os.makedirs(MODULE_DIR)
         logger.info('Settings path: {}'.format(get_settings_path()))
         logger.info('Session path: {}'.format(get_session_path()))
         logger.info('Log directory: {}'.format(LOG_DIR))
@@ -581,7 +617,9 @@ class Editor:
             os.makedirs(wd)
         # Ensure PyGameZero assets are copied over.
         images_path = os.path.join(wd, 'images')
+        fonts_path = os.path.join(wd, 'fonts')
         sounds_path = os.path.join(wd, 'sounds')
+        music_path = os.path.join(wd, 'music')
         if not os.path.exists(images_path):
             logger.debug('Creating directory: {}'.format(images_path))
             os.makedirs(images_path)
@@ -589,11 +627,17 @@ class Editor:
                         os.path.join(images_path, 'alien.png'))
             shutil.copy(path('alien_hurt.png', 'pygamezero/'),
                         os.path.join(images_path, 'alien_hurt.png'))
+        if not os.path.exists(fonts_path):
+            logger.debug('Creating directory: {}'.format(fonts_path))
+            os.makedirs(fonts_path)
         if not os.path.exists(sounds_path):
             logger.debug('Creating directory: {}'.format(sounds_path))
             os.makedirs(sounds_path)
             shutil.copy(path('eep.wav', 'pygamezero/'),
                         os.path.join(sounds_path, 'eep.wav'))
+        if not os.path.exists(music_path):
+            logger.debug('Creating directory: {}'.format(music_path))
+            os.makedirs(music_path)
         # Start the timer to poll every second for an attached or removed
         # USB device.
         self._view.set_usb_checker(1, self.check_usb)
@@ -655,13 +699,18 @@ class Editor:
                             logger.warning('The specified micro:bit runtime '
                                            'does not exist. Using default '
                                            'runtime instead.')
+                if 'zoom_level' in old_session:
+                    self._view.zoom_position = old_session['zoom_level']
+                    self._view.set_zoom()
         # handle os passed file last,
         # so it will not be focused over by another tab
         if paths and len(paths) > 0:
             self.load_cli(paths)
         if not self._view.tab_count:
-            py = _('# Write your code here :-)')
-            self._view.add_tab(None, py, self.modes[self.mode].api(), NEWLINE)
+            py = _('# Write your code here :-)') + NEWLINE
+            tab = self._view.add_tab(None, py, self.modes[self.mode].api(),
+                                     NEWLINE)
+            tab.setCursorPosition(len(py.split(NEWLINE)), 0)
             logger.info('Starting with blank file.')
         self.change_mode(self.mode)
         self._view.set_theme(self.theme)
@@ -702,55 +751,68 @@ class Editor:
                   "{0} or as the computer's default encoding {1}, but which "
                   "are encoded in some other way.\n\nIf this file was saved "
                   "in another application, re-save the file via the "
-                  "'Save as' option and set the encoding to {0}".
-                  format(ENCODING, locale.getpreferredencoding()))
+                  "'Save as' option and set the encoding to {0}")
+        error = error.format(ENCODING, locale.getpreferredencoding())
+        # Does the file even exist?
+        if not os.path.isfile(path):
+            logger.info('The file {} does not exist.'.format(path))
+            return
         # see if file is open first
         for widget in self._view.widgets:
             if widget.path is None:  # this widget is an unsaved buffer
                 continue
+            # The widget could be for a file on a MicroPython device that
+            # has since been unplugged. We should ignore it and assume that
+            # folks understand this file is no longer available (there's
+            # nothing else we can do).
+            if not os.path.isfile(widget.path):
+                logger.info(
+                    'The file {} no longer exists.'.format(widget.path))
+                continue
+            # Check for duplication of open file.
             if os.path.samefile(path, widget.path):
                 logger.info('Script already open.')
                 msg = _('The file "{}" is already open.')
                 self._view.show_message(msg.format(os.path.basename(path)))
                 self._view.focus_tab(widget)
                 return
+        name, text, newline, file_mode = None, None, None, None
         try:
             if path.lower().endswith('.py'):
                 # Open the file, read the textual content and set the name as
                 # the path to the file.
                 try:
                     text, newline = read_and_decode(path)
-                except UnicodeDecodeError as exc:
+                except UnicodeDecodeError:
                     message = _("Mu cannot read the characters in {}")
                     filename = os.path.basename(path)
                     self._view.show_message(message.format(filename), error)
                     return
                 name = path
-            elif path.lower().endswith('.hex'):
-                # Open the hex, extract the Python script therein and set the
-                # name to None, thus forcing the user to work out what to name
-                # the recovered script.
-                try:
-                    with open(path, newline='') as f:
-                        text = uflash.extract_script(f.read())
-                        newline = sniff_newline_convention(text)
-                except Exception:
-                    filename = os.path.basename(path)
-                    message = _("Unable to load file {}").format(filename)
-                    info = _("Mu doesn't understand the hex file and cannot "
-                             "extract any Python code. Are you sure this is "
-                             "a hex file created with MicroPython?")
+            else:
+                # Delegate the open operation to the Mu modes. Leave the name
+                # as None, thus forcing the user to work out what to name the
+                # recovered script.
+                for mode_name, mode in self.modes.items():
+                    try:
+                        text = mode.open_file(path)
+                    except Exception as exc:
+                        # No worries, log it and try the next mode
+                        logger.warning('Error when mode {} try to open the '
+                                       '{} file.'.format(mode_name, path),
+                                       exc_info=exc)
+                    else:
+                        if text:
+                            newline = sniff_newline_convention(text)
+                            file_mode = mode_name
+                            break
+                else:
+                    message = _('Mu was not able to open this file')
+                    info = _('Currently Mu only works with Python source '
+                             'files or hex files created with embedded '
+                             'MicroPython code.')
                     self._view.show_message(message, info)
                     return
-                name = None
-            else:
-                # Mu won't open other file types, although this may change in
-                # the future.
-                message = _("Mu only opens .py and .hex files")
-                info = _("Currently Mu only works with Python source files or "
-                         "hex files created with embedded MicroPython code.")
-                self._view.show_message(message, info)
-                return
         except OSError:
             message = _("Could not load {}").format(path)
             logger.exception('Could not load {}'.format(path))
@@ -758,17 +820,57 @@ class Editor:
                      "permission to read it?\n\nPlease check and try again.")
             self._view.show_message(message, info)
         else:
+            if file_mode and self.mode != file_mode:
+                device_name = self.modes[file_mode].name
+                message = _('Is this a {} file?').format(device_name)
+                info = _('It looks like this could be a {} file.\n\n'
+                         'Would you like to change Mu to the {}'
+                         'mode?').format(device_name, device_name)
+                if self._view.show_confirmation(
+                        message, info, icon='Question') == QMessageBox.Ok:
+                    self.change_mode(file_mode)
             logger.debug(text)
             self._view.add_tab(
                 name, text, self.modes[self.mode].api(), newline)
+
+    def get_dialog_directory(self):
+        """
+        Return the directory folder in which a load/save dialog box should
+        open into. In order of precedence this function will return:
+
+        1) The last location used by a load/save dialog.
+        2) The directory containing the current file.
+        3) The mode's reported workspace directory.
+        """
+        if self.current_path and os.path.isdir(self.current_path):
+            folder = self.current_path
+        else:
+            current_file_path = ''
+            workspace_path = self.modes[self.mode].workspace_dir()
+            tab = self._view.current_tab
+            if tab and tab.path:
+                current_file_path = os.path.dirname(os.path.abspath(tab.path))
+            folder = current_file_path if current_file_path else workspace_path
+        logger.info('Using path for file dialog: {}'.format(folder))
+        return folder
 
     def load(self):
         """
         Loads a Python file from the file system or extracts a Python script
         from a hex file.
         """
-        path = self._view.get_load_path(self.modes[self.mode].workspace_dir())
+        # Get all supported extensions from the different modes
+        extensions = ['py']
+        for mode_name, mode in self.modes.items():
+            if mode.file_extensions:
+                extensions += mode.file_extensions
+        extensions = set([e.lower() for e in extensions])
+        extensions = '*.{} *.{}'.format(' *.'.join(extensions),
+                                        ' *.'.join(extensions).upper())
+        folder = self.get_dialog_directory()
+        path = self._view.get_load_path(folder, extensions)
         if path:
+            self.current_path = os.path.dirname(os.path.abspath(path))
             self._load(path)
 
     def direct_load(self, path):
@@ -787,7 +889,6 @@ class Editor:
                 # abspath will fail for non-paths
                 self.direct_load(os.path.abspath(p))
             except Exception as e:
-                self._view.show_message(_('Can\'t open {}'.format(p)))
                 logging.warning('Can\'t open file from command line {}'.
                                 format(p), exc_info=e)
 
@@ -834,6 +935,20 @@ class Editor:
             tab.setModified(False)
             self.show_status_message(_("Saved file: {}").format(tab.path))
 
+    def check_for_shadow_module(self, path):
+        """
+        Check if the filename in the path is a shadow of a module already in
+        the Python path. For example, many learners will save their first
+        turtle based script as turtle.py, thus causing Python to never find
+        the built in turtle module because of the name conflict.
+
+        If the filename shadows an existing module, return True, otherwise,
+        return False.
+        """
+        logger.info('Checking path "{}" for shadow module.'.format(path))
+        filename = os.path.basename(path).replace('.py', '')
+        return filename in self.modes[self.mode].module_names
+
     def save(self):
         """
         Save the content of the currently active editor tab.
@@ -844,8 +959,18 @@ class Editor:
             return
         if not tab.path:
             # Unsaved file.
-            workspace = self.modes[self.mode].workspace_dir()
-            tab.path = self._view.get_save_path(workspace)
+            folder = self.get_dialog_directory()
+            path = self._view.get_save_path(folder)
+            if path and self.check_for_shadow_module(path):
+                message = _('You cannot use the filename '
+                            '"{}"').format(os.path.basename(path))
+                info = _('This name is already used by another part of '
+                         'Python. If you use this name, things are '
+                         'likely to break. Please try again with a '
+                         'different filename.')
+                self._view.show_message(message, info)
+                return
+            tab.path = path
         if tab.path:
             # The user specified a path to a file.
             if os.path.splitext(tab.path)[1] == '':
@@ -861,10 +986,13 @@ class Editor:
         Given a path, returns either an existing tab for the path or creates /
         loads a new tab for the path.
         """
+        normalised_path = os.path.normcase(os.path.abspath(path))
         for tab in self._view.widgets:
-            if tab.path == path:
-                self._view.focus_tab(tab)
-                return tab
+            if tab.path:
+                tab_path = os.path.normcase(os.path.abspath(tab.path))
+                if tab_path == normalised_path:
+                    self._view.focus_tab(tab)
+                    return tab
         self.direct_load(path)
         return self._view.current_tab
 
@@ -895,7 +1023,7 @@ class Editor:
         if tab.has_annotations:
             logger.info('Checking code.')
             self._view.reset_annotations()
-            filename = tab.path if tab.path else 'untitled'
+            filename = tab.path if tab.path else _('untitled')
             builtins = self.modes[self.mode].builtins
             flake = check_flake(filename, tab.text(), builtins)
             if flake:
@@ -925,12 +1053,11 @@ class Editor:
         """
         Display browser based help about Mu.
         """
-        logger.info('Showing help.')
-        current_locale, encoding = locale.getdefaultlocale()
-        language_code = current_locale[:2]
+        language_code = QLocale.system().name()[:2]
         major_version = '.'.join(__version__.split('.')[:2])
         url = 'https://codewith.mu/{}/help/{}'.format(language_code,
                                                       major_version)
+        logger.info('Showing help at %r.', url)
         webbrowser.open_new(url)
 
     def quit(self, *args, **kwargs):
@@ -962,12 +1089,25 @@ class Editor:
             'envars': self.envars,
             'minify': self.minify,
             'microbit_runtime': self.microbit_runtime,
+            'zoom_level': self._view.zoom_position,
         }
         session_path = get_session_path()
         with open(session_path, 'w') as out:
             logger.debug('Session: {}'.format(session))
             logger.debug('Saving session to: {}'.format(session_path))
             json.dump(session, out, indent=2)
+        # Clean up temporary mu.pth file if needed (Windows only).
+        if sys.platform == 'win32' and 'pythonw.exe' in sys.executable:
+            if site.ENABLE_USER_SITE:
+                site_path = site.USER_SITE
+                path_file = os.path.join(site_path, 'mu.pth')
+                if os.path.exists(path_file):
+                    try:
+                        os.remove(path_file)
+                        logger.info('{} removed.'.format(path_file))
+                    except Exception as ex:
+                        logger.error('Unable to delete {}'.format(path_file))
+                        logger.error(ex)
         logger.info('Quitting.\n\n')
         sys.exit(0)
 
@@ -977,7 +1117,7 @@ class Editor:
 
         Ensure any changes to the envars is updated.
         """
-        logger.info('Showing logs from {}'.format(LOG_FILE))
+        logger.info('Showing admin with logs from {}'.format(LOG_FILE))
         envars = '\n'.join(['{}={}'.format(name, value) for name, value in
                             self.envars])
         settings = {
@@ -985,21 +1125,50 @@ class Editor:
             'minify': self.minify,
             'microbit_runtime': self.microbit_runtime,
         }
+        packages = installed_packages()
         with open(LOG_FILE, 'r', encoding='utf8') as logfile:
             new_settings = self._view.show_admin(logfile.read(), settings,
-                                                 self.theme)
+                                                 '\n'.join(packages))
+        if new_settings:
             self.envars = extract_envars(new_settings['envars'])
             self.minify = new_settings['minify']
             runtime = new_settings['microbit_runtime'].strip()
             if runtime and not os.path.isfile(runtime):
                 self.microbit_runtime = ''
                 message = _('Could not find MicroPython runtime.')
-                information = _("The micro:bit runtime you specified ('{}') "
-                                "does not exist. "
-                                "Please try again.".format(runtime))
+                information = _("The micro:bit runtime you specified "
+                                "('{}') does not exist. "
+                                "Please try again.").format(runtime)
                 self._view.show_message(message, information)
             else:
                 self.microbit_runtime = runtime
+            new_packages = [p for p in
+                            new_settings['packages'].lower().split('\n')
+                            if p.strip()]
+            old_packages = [p.lower() for p in packages]
+            self.sync_package_state(old_packages, new_packages)
+        else:
+            logger.info("No admin settings changed.")
+
+    def sync_package_state(self, old_packages, new_packages):
+        """
+        Given the state of the old third party packages, compared to the new
+        third party packages, ensure that pip uninstalls and installs the
+        packages so the currently available third party packages reflects the
+        new state.
+        """
+        old = set(old_packages)
+        new = set(new_packages)
+        logger.info('Synchronize package states...')
+        logger.info('Old: {}'.format(old))
+        logger.info('New: {}'.format(new))
+        to_remove = old.difference(new)
+        to_add = new.difference(old)
+        if to_remove or to_add:
+            logger.info('To add: {}'.format(to_add))
+            logger.info('To remove: {}'.format(to_remove))
+            logger.info('Site packages: {}'.format(MODULE_DIR))
+            self._view.sync_packages(to_remove, to_add, MODULE_DIR)
 
     def select_mode(self, event=None):
         """
@@ -1009,7 +1178,9 @@ class Editor:
             return
         logger.info('Showing available modes: {}'.format(
             list(self.modes.keys())))
-        new_mode = self._view.select_mode(self.modes, self.mode, self.theme)
+        self.selecting_mode = True  # Flag to stop auto-detection of modes.
+        new_mode = self._view.select_mode(self.modes, self.mode)
+        self.selecting_mode = False
         if new_mode and new_mode != self.mode:
             logger.info('New mode selected: {}'.format(new_mode))
             self.change_mode(new_mode)
@@ -1019,9 +1190,17 @@ class Editor:
         Given the name of a mode, will make the necessary changes to put the
         editor into the new mode.
         """
+        # Remove the old mode's REPL / filesystem / plotter if required.
+        old_mode = self.modes[self.mode]
+        if hasattr(old_mode, 'remove_repl'):
+            old_mode.remove_repl()
+        if hasattr(old_mode, 'remove_fs'):
+            old_mode.remove_fs()
+        if hasattr(old_mode, 'remove_plotter'):
+            if old_mode.plotter:
+                old_mode.remove_plotter()
+        # Re-assign to new mode.
         self.mode = mode
-        # Remove the old mode's REPL.
-        self._view.remove_repl()
         # Update buttons.
         self._view.change_mode(self.modes[mode])
         button_bar = self._view.button_bar
@@ -1036,12 +1215,16 @@ class Editor:
         button_bar.connect("zoom-out", self.zoom_out, "Ctrl+-")
         button_bar.connect("theme", self.toggle_theme, "F1")
         button_bar.connect("check", self.check_code, "F2")
+        if sys.version_info[:2] >= (3, 6):
+            button_bar.connect("tidy", self.tidy_code, "F10")
         button_bar.connect("help", self.show_help, "Ctrl+H")
         button_bar.connect("quit", self.quit, "Ctrl+Q")
         self._view.status_bar.set_mode(mode)
         # Update references to default file locations.
         logger.info('Workspace directory: {}'.format(
             self.modes[mode].workspace_dir()))
+        # Reset remembered current path for load/save dialogs.
+        self.current_path = ''
         # Ensure auto-save timeouts are set.
         if self.modes[mode].save_timeout > 0:
             # Start the timer
@@ -1052,7 +1235,7 @@ class Editor:
         # Update breakpoint states.
         if not (self.modes[mode].is_debugger or self.modes[mode].has_debugger):
             for tab in self._view.widgets:
-                tab.breakpoint_lines = set()
+                tab.breakpoint_handles = set()
                 tab.reset_annotations()
         self.show_status_message(_('Changed to {} mode.').format(
             mode.capitalize()))
@@ -1063,10 +1246,11 @@ class Editor:
         """
         if self._view.modified:
             # Something has changed, so save it!
-            logger.info('Autosave has detected changes.')
             for tab in self._view.widgets:
                 if tab.path and tab.isModified():
                     self.save_tab_to_file(tab)
+                    logger.info('Autosave detected and saved '
+                                'changes in {}.'.format(tab.path))
 
     def check_usb(self):
         """
@@ -1081,7 +1265,7 @@ class Editor:
         for name, mode in self.modes.items():
             if hasattr(mode, 'find_device'):
                 # The mode can detect an attached device.
-                port = mode.find_device(with_logging=False)
+                port, serial = mode.find_device(with_logging=False)
                 if port:
                     devices.append((name, port))
                     device_types.add(name)
@@ -1101,7 +1285,13 @@ class Editor:
                 msg = _('Detected new {} device.').format(device_name)
                 self.show_status_message(msg)
                 # Only ask to switch mode if a single device type is connected
-                if len(device_types) == 1 and self.mode != mode_name:
+                # and we're not already trying to select a new mode via the
+                # dialog. Cannot change mode if a script is already being run
+                # by the current mode.
+                m = self.modes[self.mode]
+                running = hasattr(m, "runner") and m.runner
+                if (len(device_types) == 1 and self.mode != mode_name and not
+                        self.selecting_mode) and not running:
                     msg_body = _('Would you like to change Mu to the {} '
                                  'mode?').format(device_name)
                     change_confirmation = self._view.show_confirmation(
@@ -1122,17 +1312,25 @@ class Editor:
         if (self.modes[self.mode].has_debugger or
                 self.modes[self.mode].is_debugger):
             tab = self._view.current_tab
+            code = tab.text(line)
             if self.mode == 'debugger':
                 # The debugger is running.
-                self.modes['debugger'].toggle_breakpoint(line, tab)
+                if is_breakpoint_line(code):
+                    self.modes['debugger'].toggle_breakpoint(line, tab)
+                    return
             else:
                 # The debugger isn't running.
-                if line in tab.breakpoint_lines:
-                    tab.markerDelete(line, tab.BREAKPOINT_MARKER)
-                    tab.breakpoint_lines.remove(line)
-                else:
-                    tab.markerAdd(line, tab.BREAKPOINT_MARKER)
-                    tab.breakpoint_lines.add(line)
+                if tab.markersAtLine(line):
+                    tab.markerDelete(line, -1)
+                    return
+                elif is_breakpoint_line(code):
+                    handle = tab.markerAdd(line, tab.BREAKPOINT_MARKER)
+                    tab.breakpoint_handles.add(handle)
+                    return
+            msg = _('Cannot Set Breakpoint.')
+            info = _("Lines that are comments or some multi-line "
+                     "statements cannot have breakpoints.")
+            self._view.show_message(msg, info)
 
     def rename_tab(self, tab_id=None):
         """
@@ -1146,7 +1344,16 @@ class Editor:
             tab = self._view.current_tab
         if tab:
             new_path = self._view.get_save_path(tab.path)
-            if new_path:
+            if new_path and new_path != tab.path:
+                if self.check_for_shadow_module(new_path):
+                    message = _('You cannot use the filename '
+                                '"{}"').format(os.path.basename(new_path))
+                    info = _('This name is already used by another part of '
+                             'Python. If you use that name, things are '
+                             'likely to break. Please try again with a '
+                             'different filename.')
+                    self._view.show_message(message, info)
+                    return
                 logger.info('Attempting to rename {} to {}'.format(tab.path,
                                                                    new_path))
                 # The user specified a path to a file.
@@ -1167,3 +1374,84 @@ class Editor:
                 tab.path = new_path
                 logger.info('Renamed file to: {}'.format(tab.path))
                 self.save()
+
+    def find_replace(self):
+        """
+        Handle find / replace functionality.
+
+        If find/replace dialog is dismissed, do nothing.
+
+        Otherwise, check there's something to find, warn if there isn't.
+
+        If there is, find (and, optionally, replace) then confirm outcome with
+        a status message.
+        """
+        result = self._view.show_find_replace(self.find, self.replace,
+                                              self.global_replace)
+        if result:
+            self.find, self.replace, self.global_replace = result
+            if self.find:
+                if self.replace:
+                    replaced = self._view.replace_text(self.find, self.replace,
+                                                       self.global_replace)
+                    if replaced == 1:
+                        msg = _('Replaced "{}" with "{}".')
+                        self.show_status_message(msg.format(self.find,
+                                                            self.replace))
+                    elif replaced > 1:
+                        msg = _('Replaced {} matches of "{}" with "{}".')
+                        self.show_status_message(msg.format(replaced,
+                                                            self.find,
+                                                            self.replace))
+                    else:
+                        msg = _('Could not find "{}".')
+                        self.show_status_message(msg.format(self.find))
+                else:
+                    matched = self._view.highlight_text(self.find)
+                    if matched:
+                        msg = _('Highlighting matches for "{}".')
+                    else:
+                        msg = _('Could not find "{}".')
+                    self.show_status_message(msg.format(self.find))
+            else:
+                message = _('You must provide something to find.')
+                information = _("Please try again, this time with something "
+                                "in the find box.")
+                self._view.show_message(message, information)
+
+    def toggle_comments(self):
+        """
+        Ensure all highlighted lines are toggled between comments/uncommented.
+        """
+        self._view.toggle_comments()
+
+    def tidy_code(self):
+        """
+        Prettify code with Black.
+        """
+        tab = self._view.current_tab
+        if not tab or sys.version_info[:2] < (3, 6):
+            return
+
+        from black import format_str, FileMode, PY36_VERSIONS
+        try:
+            source_code = tab.text()
+            logger.info('Tidy code.')
+            logger.info(source_code)
+            filemode = FileMode(target_versions=PY36_VERSIONS, line_length=88)
+            tidy_code = format_str(source_code, mode=filemode)
+            # The following bypasses tab.setText which resets the undo history.
+            # Doing it this way means the user can use CTRL-Z to undo the
+            # reformatting from black.
+            tab.SendScintilla(tab.SCI_SETTEXT, tidy_code.encode('utf-8'))
+            self.show_status_message(_("Successfully cleaned the code. "
+                                       "Use CTRL-Z to undo."))
+        except Exception as ex:
+            # The user's code is problematic. Recover with a modal dialog
+            # containing a helpful message.
+            logger.error(ex)
+            message = _('Your code contains problems.')
+            information = _("These must be fixed before tidying will work. "
+                            "Please use the 'Check' button to highlight "
+                            "these problems.")
+            self._view.show_message(message, information)

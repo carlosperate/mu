@@ -16,12 +16,15 @@ all:
 	@echo "make publish-live - publish the project to PyPI production."
 	@echo "make docs - run sphinx to create project documentation."
 	@echo "make translate - create a messages.pot file for translations."
-	@echo "make translateall - as with translate but for all API strings.\n"
+	@echo "make translateall - as with translate but for all API strings."
+	@echo "make win32 - create a 32bit Windows installer for Mu."
+	@echo "make win64 - create a 64bit Windows installer for Mu."
+	@echo "make macos - create a macOS native application for Mu."
+	@echo "make video - create an mp4 video representing code commits.\n"
 
 clean:
 	rm -rf build
 	rm -rf dist
-	rm -rf mu_editor.egg-info
 	rm -rf .coverage
 	rm -rf .eggs
 	rm -rf docs/_build
@@ -29,6 +32,9 @@ clean:
 	rm -rf lib
 	rm -rf pynsist_pkgs
 	rm -rf pynsist_tkinter*
+	rm -rf macOS
+	rm -rf *.mp4
+	rm -rf .git/avatar/*
 	find . \( -name '*.py[co]' -o -name dropin.cache \) -delete
 	find . \( -name '*.bak' -o -name dropin.cache \) -delete
 	find . \( -name '*.tgz' -o -name dropin.cache \) -delete
@@ -42,16 +48,16 @@ else
 endif
 
 pyflakes:
-	find . \( -name _build -o -name var -o -path ./docs -o -path ./mu/contrib -o -path ./utils \) -type d -prune -o -name '*.py' -print0 | $(XARGS) pyflakes
+	find . \( -name _build -o -name var -o -path ./docs -o -path ./mu/contrib -o -path ./utils -o -path ./venv -o -path ./package \) -type d -prune -o -name '*.py' -print0 | $(XARGS) pyflakes
 
 pycodestyle:
-	find . \( -name _build -o -name var \) -type d -prune -o -name '*.py' -print0 | $(XARGS) -n 1 pycodestyle --repeat --exclude=build/*,docs/*,mu/contrib*,mu/modes/api/*,utils/* --ignore=E731,E402,W504
+	find . \( -name _build -o -name var \) -type d -prune -o -name '*.py' -print0 | $(XARGS) -n 1 pycodestyle --repeat --exclude=package/*,build/*,docs/*,mu/contrib*,mu/modes/api/*,utils/*,venv/*,.vscode/* --ignore=E731,E402,W504
 
 test: clean
-	pytest
+	pytest --random-order
 
 coverage: clean
-	pytest --cov-config .coveragerc --cov-report term-missing --cov=mu tests/
+	pytest --random-order --cov-config .coveragerc --cov-report term-missing --cov=mu tests/
 
 check: clean pycodestyle pyflakes coverage
 
@@ -63,7 +69,7 @@ publish-test: dist
 	@echo "\nPackaging complete... Uploading to PyPi..."
 	twine upload -r test --sign dist/*
 
-publish-live: dist 
+publish-live: dist
 	@echo "\nPackaging complete... Uploading to PyPi..."
 	twine upload --sign dist/*
 
@@ -85,8 +91,18 @@ translateall:
 
 win32: check
 	@echo "\nBuilding 32bit Windows installer."
-	python win_installer.py 32
+	python win_installer.py 32 setup.py
 
 win64: check
 	@echo "\nBuilding 64bit Windows installer."
-	python win_installer.py 64
+	python win_installer.py 64 setup.py
+
+macos: check
+	@echo "\nPackaging Mu into a macOS native application."
+	python setup.py macos --support-pkg=https://github.com/mu-editor/mu_portable_python_macos/releases/download/0.0.6/python3-reduced.tar.gz
+
+video: clean
+	@echo "\nFetching contributor avatars."
+	python utils/avatar.py
+	@echo "\nMaking video of source commits."
+	gource --user-image-dir .git/avatar/ --title "The Making of Mu" --logo ~/Pictures/icon.png --font-size 24 --file-idle-time 0 --key -1280x720 -s 0.1 --auto-skip-seconds .1 --multi-sampling --stop-at-end --hide mouse,progress --output-ppm-stream - --output-framerate 30 | ffmpeg -y -r 30 -f image2pipe -vcodec ppm -i - -b 65536K movie.mp4

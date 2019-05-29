@@ -1,6 +1,169 @@
 Release History
 ---------------
 
+1.1.0-alpha.1
+=============
+
+The first alpha release of 1.1. This version may contain bugs and is unfinished
+(more new features will be added in later alpha releases or, depending on
+feedback, we may change the behaviour of existing features). Please provide bug
+reports or feedback via: https://github.com/mu-editor/mu/issues/new
+
+* **NEW FEATURE** Installation of third party packages from PyPI. Click on the
+  cog icon to open the admin dialog and select the "Third Party Packages" tab.
+* **NEW FEATURE** Code tidy via the wonderful code formatter
+  `Black <https://black.readthedocs.io/en/stable/>`_. Click the new "Tidy"
+  button to reformat and tidy your code so it looks more readable. If your code
+  has errors, these will be pointed out. Many thanks to Black's creator and
+  maintainer, Łukasz Langa, for this contribution.
+* **NEW FEATURE** A new ESP8266 / ESP32 mode for working with these WiFi
+  enabled cheap IoT boards. Many thanks to Martin Dybdal for driving this
+  work forward and doing the heavy lifting. Thanks also to Murilo Polese for
+  testing and very constructive input in the review stage of this feature.
+* **OS CHANGE** Due to Qt's and Travis's lack of support, Mu will only run on
+  Mac OS 10.12 and above.
+* Ensure line-number margin is not too sensitive to inaccurate clicking from
+  young coders trying to position the cursor at the beginning of the line.
+  Thanks to Tiago Montes for this enhancement.
+* Fix some typos in the French translation. Thank you to GitHub user
+  @camillem.
+* Fix a bug relating to Adafruit boards when a file on a board which is then
+  unplugged is saved, Mu used to crash. Thanks to Melissa LeBlanc-Williams for
+  the report of this problem.
+* Fix problem with a missing newline at the end of a file. Thanks to Melissa
+  LeBlanc-Williams for the eagle-eyes and fix.
+* Fix for PYTHONPATH related problems on Windows (the current directory is now
+  on the path when a script is run). Thanks to Tim Golden for this fix.
+* Update to locale detection (use Qt's QLocale class). Thanks to Tiago Montes
+  for making this happen.
+* Fix bug relating to match selection of non-ASCII characters. Thank you to
+  Tiago Montes for this work.
+* Fixed various encoding related issues on OSX.
+* Various minor / trivial bug fixes and tidy ups.
+
+1.0.2
+=====
+
+Another bugfix and translation release. No new features were added. Unless
+there are show-stoppers, the next release will be 1.1 with new features.
+
+* Updated OSX to macOS, as per Apple's usage of the terms. Thanks Craig Steele.
+* Updates and improvements to the Chinese translation. Thank John Guan.
+* Improved locale detection on macOS. Many thanks to Tiago Montes.
+* Cosmetic stripping of trailing spaces on save. Thanks to Tim Golden.
+* Update PyQt version so pip installed Mu works with Python 3.5. Thanks to
+  Carlos Pereira Atencio.
+* Fix incorrect setting of dataTerminalReady flag. Thanks to GitHub user
+  @wu6692776.
+* Spanish language improvements and fixes by Juan Biondi, @yeyeto2788 and
+  Carlos Pereira Atencio.
+* Improvements and fixes to the German translation by Eberhard Fahle.
+* Fix encoding bug on Windows which caused crashes and lost files. Many thanks
+  to Tim Golden for this work.
+* Keyboard focus loss when closing REPL is now fixed. Thanks again Tim Golden.
+* More devices for Adafruit mode along with a capability to work with future
+  devices which have the Adafruit vendor ID. Thanks to Limor Friend for this
+  contribution.
+* Fix a bug introduced in 1.0.1 where output from a child Python process was
+  being truncated.
+* Fix an off-by-one error when reading bytes from UART on MicroPython devices.
+* Ensure zoom is consistent and remembered between panes and sessions.
+* Ensure mu_code and/or current directory of current script are on Python path
+  in Mu installed from the installer on Windows. Thanks to Tim Golden and Tim
+  McCurrach for helping to test the fix.
+* Added Argon, Boron and Xenon boards to Adafruit mode since they're also
+  supported by Adafruit's CircuitPython.
+* The directory used to start a load/save dialog is either what the user last
+  selected, the current directory of the current file or the mode's working
+  directory (in order of precedence). This is reset when the mode is changed.
+* Various minor typo and bug fixes.
+
+1.0.1
+=====
+
+This is a bugfix and new translation release. No new features were added. The
+next release will be 1.1.0 with some new features.
+
+* Added a German translation by René Raab.
+* Added various new Adafruit boards, thanks Limor!
+* Added a Vietnamese translation by GitHub user @doanminhdang.
+* Fix bug in MicroPython REPL when dealing with colour escape sequences, thanks
+  Martin Dybdal of Coding Pirates! Arrr.
+* Ensured anyone trying to setup on an incompatible version of Python is given
+  a friendly message explaining the problem. Thanks to the hugely talented
+  René Dudfield for migrating this helpful function from PyGame!
+* Added a Brasilian translation by Marco A L Barbosa.
+* Added missing API docs for PyGameZero. Thanks to Justin Riley.
+* Added a Swedish translation by Filip Korling.
+* Fixes to various metadata configuration entries by Nick Morrott.
+* Updated to a revised Chinese translation. Thanks to John Guan.
+* Added the Mappa MUndi (roadmap) to the developer documentation.
+* Added a Polish translation by Filip Kłębczyk.
+* Fixes and enhancements to the UI to aid dyslexic users by Tim McCurrach.
+* Updated to version 1.0.0.final for MicroPython on the BBC micro:bit. Many
+  thanks to Damien George of the MicroPython project for his amazing work.
+* Many other minor bugs caught and fixed by the likes of Zander and Carlos!
+
+1.0.0
+=====
+
+* Fix for font related issues in OSX Mojave. Thanks to Steve Stagg for spotting
+  and fixing.
+* Fix for encoding issue encountered during code checking. Thanks to Tim
+  Golden for a swift fix.
+* Fix for orphaned modal dialog. Thanks for spotting this Zander Brown.
+* Minor revisions to hot-key sequences to avoid duplications. All documented
+  at https://codewith.mu/en/tutorials/1.0/shortcuts.
+* Update to latest version of uflash and MicroPython 1.0.0-rc.2 for micro:bit.
+* Updated to latest GuiZero in Windows installers.
+* Update third party API documentation used by QScintilla for code completion
+  and call tips. Includes CircuitPython 3 and PyGame Zero 1.2.
+* Added swag related graphics to the repository (non-functional change).
+
+1.0.0.rc.1
+==========
+
+* Various UI style clean ups to make sure the look of Mu is more consistent
+  between platforms. Thanks to Zander Brown for this valuable work.
+* Added French translation of the user interface. Thanks to Gerald Quintana.
+* Added Japanese translation of the user interface. Thanks to @MinoruInachi.
+* Added Spanish translation of the user interface. Thanks to Carlos Pereira
+  Atencio with help from Oier Echaniz.
+* Added Portuguese translation of the user interface. Thanks to Tiago Montes.
+* Fixed various edge cases relating to the new-style flashing of micro:bits.
+* Fixed off-by-one error in the visual debugger highlighting of code (caused
+  by Windows newlines not correctly handled).
+* Fixed shadow module related problem relating to Adafruit mode. It's now
+  possible to save "code.py" files onto boards.
+* Updated to latest version of uflash and MicroPython 1.0.0-rc.1 for micro:bit.
+* Various minor bugs and niggles have been fixed.
+
+1.0.0.beta.17
+=============
+
+* Update to the latest version of uflash with the latest version of MicroPython
+  for the BBC micro:bit.
+* Change flashing the BBC micro:bit to become more efficient (based on the
+  copying of files to the boards small "fake" filesystem, rather than
+  re-flashing the whole device in one go).
+* Ensure user agrees to GPL3 license when installing on OSX.
+* Fix Windows "make" file to correctly report errors thanks to Tim Golden.
+* The debugger in Python mode now correctly handles user-generated exceptions.
+* The debugger in Python mode updates the stack when no breakpoints are set.
+* Major update of the OSX based automated build system.
+* Modal dialog boxes should behave better on GTK based desktops thanks to
+  Zander Brown.
+* Right click to access context menu in file panes in micro:bit mode so local
+  files can be opened in Mu.
+* Fix bug where REPL, Files and Plotter buttons got into a bad state on
+  mode change.
+* Update to use PyQt 5.11.
+* On save, check for shadow modules (i.e. user's are not allowed to save
+  code whose filename would override an existing module name).
+* Automatic comment toggling via Ctrl-K shortcut.
+* A simple find and replace diaolog is now available via the Ctrl-F shortcut.
+* Various minor bugs and niggles have been squashed.
+
 1.0.0.beta.16
 =============
 
@@ -43,6 +206,14 @@ Release History
 * Fix problem in OSX with the ``mount`` command when detecting Circuit Python
   boards. Thanks to Frank Morton for finding and fixing this.
 * Add data flood avoidance to the plotter.
+* OSX automated packaging. Thanks to Russell Keith-Magee and the team at
+  BeeWare for their invaluable help with this problematic task.
+* Refactoring and bug fixing of the visual debugger's user interface. Thank you
+  to Martin O'Hanlon and Carlos Pereira Atencio for their invaluable bug
+  reports and testing.
+* Various fixes to the way the UI and themes are displayed (crisper icons on
+  HiDPI displays and various other fixes). Thanks to Steve Stagg for putting
+  lipstick on the pig. ;-)
 * A huge number of minor bug fixes, UI clean-ups and simplifications.
 
 1.0.0.beta.15

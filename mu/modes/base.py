@@ -22,9 +22,12 @@ import os.path
 import csv
 import time
 import logging
+import pkgutil
+from serial import Serial
 from PyQt5.QtSerialPort import QSerialPortInfo
-from PyQt5.QtCore import QObject
+from PyQt5.QtCore import QObject, pyqtSignal
 from mu.logic import HOME_DIRECTORY, WORKSPACE_NAME, get_settings_path
+from mu.contrib import microfs
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,12 @@ BOARD_IDS = set([
     (0x239A, 0x8015),  # circuitplayground m0 PID prototype
     (0x239A, 0x801B),  # feather m0 express PID
 ])
+
+
+# Cache module names for filename shadow checking later.
+MODULE_NAMES = set([name for _, name, _ in pkgutil.iter_modules()])
+MODULE_NAMES.add('sys')
+MODULE_NAMES.add('builtins')
 
 
 def get_default_workspace():
@@ -86,6 +95,8 @@ class BaseMode(QObject):
     has_debugger = False
     save_timeout = 5  #: Number of seconds to wait before saving work.
     builtins = None  #: Symbols to assume as builtins when checking code style.
+    file_extensions = []
+    module_names = MODULE_NAMES
 
     def __init__(self, editor, view):
         self.editor = editor
@@ -125,6 +136,14 @@ class BaseMode(QObject):
             if k in self.view.button_bar.slots:
                 self.view.button_bar.slots[k].setEnabled(bool(v))
 
+    def return_focus_to_current_tab(self):
+        """
+        After, eg, stopping the plotter or closing the REPL return the focus
+        to the currently-active tab is there is one.
+        """
+        if self.view.current_tab:
+            self.view.current_tab.setFocus()
+
     def add_plotter(self):
         """
         Mode specific implementation of adding and connecting a plotter to
@@ -153,6 +172,7 @@ class BaseMode(QObject):
         self.view.remove_plotter()
         self.plotter = None
         logger.info('Removing plotter')
+        self.return_focus_to_current_tab()
 
     def on_data_flood(self):
         """
@@ -176,36 +196,47 @@ class BaseMode(QObject):
                  "time.")
         self.view.show_message(msg, info)
 
+    def open_file(self, path):
+        """
+        Some files are not plain text and each mode can attempt to decode them.
+        """
+        return None
+
 
 class MicroPythonMode(BaseMode):
     """
     Includes functionality that works with a USB serial based REPL.
     """
     valid_boards = BOARD_IDS
+    force_interrupt = True
 
     def find_device(self, with_logging=True):
         """
-        Returns the port for the first MicroPython-ish device found connected
-        to the host computer. If no device is found, return None.
+        Returns the port and serial number for the first MicroPython-ish device
+        found connected to the host computer. If no device is found, returns
+        the tuple (None, None).
         """
         available_ports = QSerialPortInfo.availablePorts()
         for port in available_ports:
             pid = port.productIdentifier()
             vid = port.vendorIdentifier()
-            # Look for the port VID & PID in the list of know board IDs
-            if (vid, pid) in self.valid_boards:
+            # Look for the port VID & PID in the list of known board IDs
+            if (vid, pid) in self.valid_boards or \
+               (vid, None) in self.valid_boards:
                 port_name = port.portName()
+                serial_number = port.serialNumber()
                 if with_logging:
                     logger.info('Found device on port: {}'.format(port_name))
-                return self.port_path(port_name)
+                    logger.info('Serial number: {}'.format(serial_number))
+                return (self.port_path(port_name), serial_number)
         if with_logging:
             logger.warning('Could not find device.')
             logger.debug('Available ports:')
-            logger.debug(['PID:{} VID:{} PORT:{}'.format(p.productIdentifier(),
-                                                         p.vendorIdentifier(),
-                                                         p.portName())
-                         for p in available_ports])
-        return None
+            logger.debug(['PID:0x{:04x} VID:0x{:04x} PORT:{}'.format(
+                p.productIdentifier(),
+                p.vendorIdentifier(),
+                p.portName()) for p in available_ports])
+        return (None, None)
 
     def port_path(self, port_name):
         if os.name == 'posix':
@@ -241,10 +272,11 @@ class MicroPythonMode(BaseMode):
         Detect a connected MicroPython based device and, if found, connect to
         the REPL and display it to the user.
         """
-        device_port = self.find_device()
+        device_port, serial_number = self.find_device()
         if device_port:
             try:
-                self.view.add_micropython_repl(device_port, self.name)
+                self.view.add_micropython_repl(device_port, self.name,
+                                               self.force_interrupt)
                 logger.info('Started REPL on port: {}'.format(device_port))
                 self.repl = True
             except IOError as ex:
@@ -280,7 +312,7 @@ class MicroPythonMode(BaseMode):
         """
         Check if REPL exists, and if so, enable the plotter pane!
         """
-        device_port = self.find_device()
+        device_port, serial_number = self.find_device()
         if device_port:
             try:
                 self.view.add_micropython_plotter(device_port, self.name, self)
@@ -310,3 +342,101 @@ class MicroPythonMode(BaseMode):
         """
         self.remove_repl()
         super().on_data_flood()
+
+
+class FileManager(QObject):
+    """
+    Used to manage filesystem operations on connected MicroPython devices in a
+    manner such that the UI remains responsive.
+
+    Provides an FTP-ish API. Emits signals on success or failure of different
+    operations.
+    """
+
+    # Emitted when the tuple of files on the device is known.
+    on_list_files = pyqtSignal(tuple)
+    # Emitted when the file with referenced filename is got from the device.
+    on_get_file = pyqtSignal(str)
+    # Emitted when the file with referenced filename is put onto the device.
+    on_put_file = pyqtSignal(str)
+    # Emitted when the file with referenced filename is deleted from the
+    # device.
+    on_delete_file = pyqtSignal(str)
+    # Emitted when Mu is unable to list the files on the device.
+    on_list_fail = pyqtSignal()
+    # Emitted when the referenced file fails to be got from the device.
+    on_get_fail = pyqtSignal(str)
+    # Emitted when the referenced file fails to be put onto the device.
+    on_put_fail = pyqtSignal(str)
+    # Emitted when the referenced file fails to be deleted from the device.
+    on_delete_fail = pyqtSignal(str)
+
+    def __init__(self, port):
+        """
+        Initialise with a port.
+        """
+        super().__init__()
+        self.port = port
+
+    def on_start(self):
+        """
+        Run when the thread containing this object's instance is started so
+        it can emit the list of files found on the connected device.
+        """
+        # Create a new serial connection.
+        try:
+            self.serial = Serial(self.port, 115200, timeout=1, parity='N')
+            self.ls()
+        except Exception as ex:
+            logger.exception(ex)
+            self.on_list_fail.emit()
+
+    def ls(self):
+        """
+        List the files on the micro:bit. Emit the resulting tuple of filenames
+        or emit a failure signal.
+        """
+        try:
+            result = tuple(microfs.ls(self.serial))
+            self.on_list_files.emit(result)
+        except Exception as ex:
+            logger.exception(ex)
+            self.on_list_fail.emit()
+
+    def get(self, device_filename, local_filename):
+        """
+        Get the referenced device filename and save it to the local
+        filename. Emit the name of the filename when complete or emit a
+        failure signal.
+        """
+        try:
+            microfs.get(device_filename, local_filename, serial=self.serial)
+            self.on_get_file.emit(device_filename)
+        except Exception as ex:
+            logger.error(ex)
+            self.on_get_fail.emit(device_filename)
+
+    def put(self, local_filename):
+        """
+        Put the referenced local file onto the filesystem on the micro:bit.
+        Emit the name of the file on the micro:bit when complete, or emit
+        a failure signal.
+        """
+        try:
+            microfs.put(local_filename, target=None, serial=self.serial)
+            self.on_put_file.emit(os.path.basename(local_filename))
+        except Exception as ex:
+            logger.error(ex)
+            self.on_put_fail.emit(local_filename)
+
+    def delete(self, device_filename):
+        """
+        Delete the referenced file on the device's filesystem. Emit the name
+        of the file when complete, or emit a failure signal.
+        """
+        try:
+            microfs.rm(device_filename, serial=self.serial)
+            self.on_delete_file.emit(device_filename)
+        except Exception as ex:
+            logger.error(ex)
+            self.on_delete_fail.emit(device_filename)

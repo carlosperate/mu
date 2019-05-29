@@ -25,16 +25,17 @@ from PyQt5.QtWidgets import (QToolBar, QAction, QDesktopWidget, QWidget,
                              QVBoxLayout, QTabWidget, QFileDialog, QMessageBox,
                              QLabel, QMainWindow, QStatusBar, QDockWidget,
                              QShortcut)
-from PyQt5.QtGui import QKeySequence, QStandardItemModel, QStandardItem
+from PyQt5.QtGui import QKeySequence, QStandardItemModel
 from PyQt5.QtSerialPort import QSerialPort
 from mu import __version__
-from mu.interface.dialogs import ModeSelector, AdminDialog
+from mu.interface.dialogs import (ModeSelector, AdminDialog, FindReplaceDialog,
+                                  PackageDialog)
 from mu.interface.themes import (DayTheme, NightTheme, ContrastTheme,
-                                 DEFAULT_FONT_SIZE, DAY_STYLE, NIGHT_STYLE,
-                                 CONTRAST_STYLE)
-from mu.interface.panes import (DebugInspector, PythonProcessPane,
-                                JupyterREPLPane, MicroPythonREPLPane,
-                                FileSystemPane, PlotterPane)
+                                 DEFAULT_FONT_SIZE)
+from mu.interface.panes import (DebugInspector, DebugInspectorItem,
+                                PythonProcessPane, JupyterREPLPane,
+                                MicroPythonREPLPane, FileSystemPane,
+                                PlotterPane)
 from mu.interface.editor import EditorPane
 from mu.resources import load_icon, load_pixmap
 
@@ -93,8 +94,12 @@ class ButtonBar(QToolBar):
         self.addSeparator()
         self.addAction(name="check", display_name=_('Check'),
                        tool_text=_("Check your code for mistakes."))
+        if sys.version_info[:2] >= (3, 6):
+            self.addAction(name="tidy", display_name=_('Tidy'),
+                           tool_text=_("Tidy up the layout of your code."))
         self.addAction(name="help", display_name=_('Help'),
                        tool_text=_("Show help about Mu in a browser."))
+        self.addSeparator()
         self.addAction(name="quit", display_name=_('Quit'),
                        tool_text=_("Quit Mu."))
 
@@ -103,7 +108,7 @@ class ButtonBar(QToolBar):
         Compact button bar for when window is very small.
         """
         font_size = DEFAULT_FONT_SIZE
-        if width < 940 and height > 600:
+        if width < 1124 and height > 600:
             self.setIconSize(QSize(48, 48))
         elif height < 600 and width < 940:
             font_size = 10
@@ -182,32 +187,46 @@ class Window(QMainWindow):
     serial = None
     repl = None
     plotter = None
+    zooms = ('xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl')  # levels of zoom.
+    zoom_position = 2  # current level of zoom (as position in zooms tuple).
 
-    _zoom_in = pyqtSignal(int)
-    _zoom_out = pyqtSignal(int)
+    _zoom_in = pyqtSignal(str)
+    _zoom_out = pyqtSignal(str)
     close_serial = pyqtSignal()
     write_to_serial = pyqtSignal(bytes)
     data_received = pyqtSignal(bytes)
     open_file = pyqtSignal(str)
+    load_theme = pyqtSignal(str)
+    previous_folder = None
+
+    def set_zoom(self):
+        """
+        Sets the zoom to current zoom_position level.
+        """
+        self._zoom_in.emit(self.zooms[self.zoom_position])
 
     def zoom_in(self):
         """
         Handles zooming in.
         """
-        self._zoom_in.emit(2)
+        self.zoom_position = min(self.zoom_position + 1, len(self.zooms) - 1)
+        self._zoom_in.emit(self.zooms[self.zoom_position])
 
     def zoom_out(self):
         """
         Handles zooming out.
         """
-        self._zoom_out.emit(2)
+        self.zoom_position = max(self.zoom_position - 1, 0)
+        self._zoom_out.emit(self.zooms[self.zoom_position])
 
     def connect_zoom(self, widget):
         """
-        Connects a referenced widget to the zoom related signals.
+        Connects a referenced widget to the zoom related signals and sets
+        the zoom of the widget to the current zoom level.
         """
-        self._zoom_in.connect(widget.zoomIn)
-        self._zoom_out.connect(widget.zoomOut)
+        self._zoom_in.connect(widget.set_zoom)
+        self._zoom_out.connect(widget.set_zoom)
+        widget.set_zoom(self.zooms[self.zoom_position])
 
     @property
     def current_tab(self):
@@ -224,13 +243,16 @@ class Window(QMainWindow):
         for tab in self.widgets:
             tab.setReadOnly(is_readonly)
 
-    def get_load_path(self, folder):
+    def get_load_path(self, folder, extensions='*'):
         """
         Displays a dialog for selecting a file to load. Returns the selected
         path. Defaults to start in the referenced folder.
         """
-        path, _ = QFileDialog.getOpenFileName(self.widget, 'Open file', folder,
-                                              '*.py *.PY *.hex')
+        path, _ = QFileDialog.getOpenFileName(
+            self.widget, 'Open file',
+            folder if self.previous_folder is None else self.previous_folder,
+            extensions)
+        self.previous_folder = os.path.dirname(path)
         logger.debug('Getting load path: {}'.format(path))
         return path
 
@@ -239,7 +261,10 @@ class Window(QMainWindow):
         Displays a dialog for selecting a file to save. Returns the selected
         path. Defaults to start in the referenced folder.
         """
-        path, _ = QFileDialog.getSaveFileName(self.widget, 'Save file', folder)
+        path, _ = QFileDialog.getSaveFileName(
+            self.widget, 'Save file',
+            folder if self.previous_folder is None else self.previous_folder)
+        self.previous_folder = os.path.dirname(path)
         logger.debug('Getting save path: {}'.format(path))
         return path
 
@@ -249,9 +274,11 @@ class Window(QMainWindow):
         host computer's filesystem. Returns the selected path. Defaults to
         start in the referenced folder.
         """
-        path = QFileDialog.getExistingDirectory(self.widget,
-                                                'Locate BBC micro:bit', folder,
-                                                QFileDialog.ShowDirsOnly)
+        path = QFileDialog.getExistingDirectory(
+            self.widget, 'Locate BBC micro:bit',
+            folder if self.previous_folder is None else self.previous_folder,
+            QFileDialog.ShowDirsOnly)
+        self.previous_folder = os.path.dirname(path)
         logger.debug('Getting micro:bit path: {}'.format(path))
         return path
 
@@ -281,6 +308,7 @@ class Window(QMainWindow):
         new_tab.setFocus()
         if self.read_only_tabs:
             new_tab.setReadOnly(self.read_only_tabs)
+        return new_tab
 
     def focus_tab(self, tab):
         index = self.tabs.indexOf(tab)
@@ -337,7 +365,7 @@ class Window(QMainWindow):
         self.serial = QSerialPort()
         self.serial.setPortName(port)
         if self.serial.open(QIODevice.ReadWrite):
-            self.serial.dataTerminalReady = True
+            self.serial.setDataTerminalReady(True)
             if not self.serial.isDataTerminalReady():
                 # Using pyserial as a 'hack' to open the port and set DTR
                 # as QtSerial does not seem to work on some Windows :(
@@ -350,21 +378,29 @@ class Window(QMainWindow):
             self.serial.setBaudRate(115200)
             self.serial.readyRead.connect(self.on_serial_read)
         else:
-            raise IOError("Cannot connect to device on port {}".format(port))
+            msg = _("Cannot connect to device on port {}").format(port)
+            raise IOError(msg)
 
     def close_serial_link(self):
         """
         Close and clean up the currently open serial link.
         """
-        self.serial.close()
-        self.serial = None
+        if self.serial:
+            self.serial.close()
+            self.serial = None
 
-    def add_filesystem(self, home, file_manager):
+    def add_filesystem(self, home, file_manager, board_name="board"):
         """
         Adds the file system pane to the application.
         """
         self.fs_pane = FileSystemPane(home)
-        self.fs = QDockWidget(_('Filesystem on micro:bit'))
+
+        @self.fs_pane.open_file.connect
+        def on_open_file(file):
+            # Bubble the signal up
+            self.open_file.emit(file)
+
+        self.fs = QDockWidget(_('Filesystem on ') + board_name)
         self.fs.setWidget(self.fs_pane)
         self.fs.setFeatures(QDockWidget.DockWidgetMovable)
         self.fs.setAllowedAreas(Qt.BottomDockWidgetArea)
@@ -387,17 +423,18 @@ class Window(QMainWindow):
         self.connect_zoom(self.fs_pane)
         return self.fs_pane
 
-    def add_micropython_repl(self, port, name):
+    def add_micropython_repl(self, port, name, force_interrupt=True):
         """
         Adds a MicroPython based REPL pane to the application.
         """
         if not self.serial:
             self.open_serial_link(port)
-            # Send a Control-B / exit raw mode.
-            self.serial.write(b'\x02')
-            # Send a Control-C / keyboard interrupt.
-            self.serial.write(b'\x03')
-        repl_pane = MicroPythonREPLPane(serial=self.serial, theme=self.theme)
+            if force_interrupt:
+                # Send a Control-B / exit raw mode.
+                self.serial.write(b'\x02')
+                # Send a Control-C / keyboard interrupt.
+                self.serial.write(b'\x03')
+        repl_pane = MicroPythonREPLPane(serial=self.serial)
         self.data_received.connect(repl_pane.process_bytes)
         self.add_repl(repl_pane, name)
 
@@ -407,7 +444,7 @@ class Window(QMainWindow):
         """
         if not self.serial:
             self.open_serial_link(port)
-        plotter_pane = PlotterPane(theme=self.theme)
+        plotter_pane = PlotterPane()
         self.data_received.connect(plotter_pane.process_bytes)
         plotter_pane.data_flood.connect(mode.on_data_flood)
         self.add_plotter(plotter_pane, name)
@@ -419,7 +456,7 @@ class Window(QMainWindow):
         running script are running (but not at the same time), it'll just grab
         data emitted by the REPL or script via data_received.
         """
-        plotter_pane = PlotterPane(theme=self.theme)
+        plotter_pane = PlotterPane()
         self.data_received.connect(plotter_pane.process_bytes)
         plotter_pane.data_flood.connect(mode.on_data_flood)
         self.add_plotter(plotter_pane, _('Python3 data tuple'))
@@ -430,7 +467,7 @@ class Window(QMainWindow):
         """
         kernel_manager.kernel.gui = 'qt4'
         kernel_client.start_channels()
-        ipython_widget = JupyterREPLPane(theme=self.theme)
+        ipython_widget = JupyterREPLPane()
         ipython_widget.kernel_manager = kernel_manager
         ipython_widget.kernel_client = kernel_client
         ipython_widget.on_append_text.connect(self.on_stdout_write)
@@ -469,7 +506,8 @@ class Window(QMainWindow):
 
     def add_python3_runner(self, script_name, working_directory,
                            interactive=False, debugger=False,
-                           command_args=None, runner=None, envars=None):
+                           command_args=None, runner=None, envars=None,
+                           python_args=None):
         """
         Display console output for the referenced Python script.
 
@@ -487,8 +525,14 @@ class Window(QMainWindow):
         will be passed as further arguments into the command run in the
         new process.
 
-        If runner is give, this is used as the command to start the Python
+        If runner is given, this is used as the command to start the Python
         process.
+
+        If envars is given, these will become part of the environment context
+        of the new chlid process.
+
+        If python_args is given, these will be passed as arguments to the
+        Python runtime used to launch the child process.
         """
         self.process_runner = PythonProcessPane(self)
         self.runner = QDockWidget(_("Running: {}").format(
@@ -501,7 +545,7 @@ class Window(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.runner)
         self.process_runner.start_process(script_name, working_directory,
                                           interactive, debugger, command_args,
-                                          envars, runner)
+                                          envars, runner, python_args)
         self.process_runner.setFocus()
         self.process_runner.on_append_text.connect(self.on_stdout_write)
         self.connect_zoom(self.process_runner)
@@ -514,7 +558,6 @@ class Window(QMainWindow):
         self.debug_inspector = DebugInspector()
         self.debug_model = QStandardItemModel()
         self.debug_inspector.setModel(self.debug_model)
-        self.debug_inspector.setUniformRowHeights(True)
         self.inspector = QDockWidget(_('Debug Inspector'))
         self.inspector.setWidget(self.debug_inspector)
         self.inspector.setFeatures(QDockWidget.DockWidgetMovable)
@@ -542,32 +585,34 @@ class Window(QMainWindow):
                 val = None
             if isinstance(val, list):
                 # Show a list consisting of rows of position/value
-                list_item = QStandardItem(name)
+                list_item = DebugInspectorItem(name)
                 for i, i_val in enumerate(val):
                     list_item.appendRow([
-                        QStandardItem(str(i)),
-                        QStandardItem(repr(i_val))
+                        DebugInspectorItem(str(i)),
+                        DebugInspectorItem(repr(i_val))
                     ])
                 self.debug_model.appendRow([
                     list_item,
-                    QStandardItem(_('(A list of {} items.)').format(len(val)))
+                    DebugInspectorItem(_('(A list of {} items.)')
+                                       .format(len(val)))
                 ])
             elif isinstance(val, dict):
                 # Show a dict consisting of rows of key/value pairs.
-                dict_item = QStandardItem(name)
+                dict_item = DebugInspectorItem(name)
                 for k, k_val in val.items():
                     dict_item.appendRow([
-                        QStandardItem(repr(k)),
-                        QStandardItem(repr(k_val))
+                        DebugInspectorItem(repr(k)),
+                        DebugInspectorItem(repr(k_val))
                     ])
                 self.debug_model.appendRow([
                     dict_item,
-                    QStandardItem(_('(A dict of {} items.)').format(len(val)))
+                    DebugInspectorItem(_('(A dict of {} items.)')
+                                       .format(len(val)))
                 ])
             else:
                 self.debug_model.appendRow([
-                    QStandardItem(name),
-                    QStandardItem(locals_dict[name]),
+                    DebugInspectorItem(name),
+                    DebugInspectorItem(locals_dict[name]),
                 ])
 
     def remove_filesystem(self):
@@ -590,7 +635,7 @@ class Window(QMainWindow):
             self.repl.deleteLater()
             self.repl = None
             if not self.plotter:
-                self.serial = None
+                self.close_serial_link()
 
     def remove_plotter(self):
         """
@@ -602,7 +647,7 @@ class Window(QMainWindow):
             self.plotter.deleteLater()
             self.plotter = None
             if not self.repl:
-                self.serial = None
+                self.close_serial_link()
 
     def remove_python_runner(self):
         """
@@ -630,16 +675,14 @@ class Window(QMainWindow):
         Sets the theme for the REPL and editor tabs.
         """
         self.theme = theme
+        self.load_theme.emit(theme)
         if theme == 'contrast':
-            self.setStyleSheet(CONTRAST_STYLE)
             new_theme = ContrastTheme
             new_icon = 'theme_day'
         elif theme == 'night':
             new_theme = NightTheme
             new_icon = 'theme_contrast'
-            self.setStyleSheet(NIGHT_STYLE)
         else:
-            self.setStyleSheet(DAY_STYLE)
             new_theme = DayTheme
             new_icon = 'theme'
         for widget in self.widgets:
@@ -650,16 +693,28 @@ class Window(QMainWindow):
         if hasattr(self, 'plotter') and self.plotter:
             self.plotter_pane.set_theme(theme)
 
-    def show_admin(self, log, settings, theme):
+    def show_admin(self, log, settings, packages):
         """
-        Display the administrivite dialog with referenced content of the log
+        Display the administrative dialog with referenced content of the log
         and settings. Return a dictionary of the settings that may have been
         changed by the admin dialog.
         """
-        admin_box = AdminDialog()
-        admin_box.setup(log, settings, theme)
-        admin_box.exec()
-        return admin_box.settings()
+        admin_box = AdminDialog(self)
+        admin_box.setup(log, settings, packages)
+        result = admin_box.exec()
+        if result:
+            return admin_box.settings()
+        else:
+            return {}
+
+    def sync_packages(self, to_remove, to_add, module_dir):
+        """
+        Display a modal dialog that indicates the status of the add/remove
+        package management operation.
+        """
+        package_box = PackageDialog(self)
+        package_box.setup(to_remove, to_add, module_dir)
+        package_box.exec()
 
     def show_message(self, message, information=None, icon=None):
         """
@@ -699,7 +754,7 @@ class Window(QMainWindow):
         to override the icon to one of the following settings: NoIcon,
         Question, Information, Warning or Critical.
         """
-        message_box = QMessageBox()
+        message_box = QMessageBox(self)
         message_box.setText(message)
         message_box.setWindowTitle(_('Mu'))
         if information:
@@ -770,7 +825,8 @@ class Window(QMainWindow):
         self.setWindowIcon(load_icon(self.icon))
         self.update_title()
         self.read_only_tabs = False
-        self.setMinimumSize(820, 400)
+        self.setMinimumSize(920, 400)
+        self.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.North)
 
         self.widget = QWidget()
 
@@ -793,16 +849,16 @@ class Window(QMainWindow):
         size = resizeEvent.size()
         self.button_bar.set_responsive_mode(size.width(), size.height())
 
-    def select_mode(self, modes, current_mode, theme):
+    def select_mode(self, modes, current_mode):
         """
         Display the mode selector dialog and return the result.
         """
-        mode_select = ModeSelector()
-        mode_select.setup(modes, current_mode, theme)
+        mode_select = ModeSelector(self)
+        mode_select.setup(modes, current_mode)
         mode_select.exec()
         try:
             return mode_select.get_mode()
-        except Exception as ex:
+        except Exception:
             return None
 
     def change_mode(self, mode):
@@ -852,7 +908,7 @@ class Window(QMainWindow):
 
     def open_directory_from_os(self, path):
         """
-        Given the path to a directoy, open the OS's built in filesystem
+        Given the path to a directory, open the OS's built in filesystem
         explorer for that path. Works with Windows, OSX and Linux.
         """
         if sys.platform == 'win32':
@@ -864,6 +920,80 @@ class Window(QMainWindow):
         else:
             # Assume freedesktop.org on unix-y.
             os.system('xdg-open "{}"'.format(path))
+
+    def connect_find_replace(self, handler, shortcut):
+        """
+        Create a keyboard shortcut and associate it with a handler for doing
+        a find and replace.
+        """
+        self.find_replace_shortcut = QShortcut(QKeySequence(shortcut), self)
+        self.find_replace_shortcut.activated.connect(handler)
+
+    def show_find_replace(self, find, replace, global_replace):
+        """
+        Display the find/replace dialog. If the dialog's OK button was clicked
+        return a tuple containing the find term, replace term and global
+        replace flag.
+        """
+        finder = FindReplaceDialog(self)
+        finder.setup(find, replace, global_replace)
+        if finder.exec():
+            return (finder.find(), finder.replace(), finder.replace_flag())
+
+    def replace_text(self, target_text, replace, global_replace):
+        """
+        Given target_text, replace the first instance after the cursor with
+        "replace". If global_replace is true, replace all instances of
+        "target". Returns the number of times replacement has occurred.
+        """
+        if not self.current_tab:
+            return 0
+        if global_replace:
+            counter = 0
+            found = self.current_tab.findFirst(target_text, True, True,
+                                               False, False, line=0, index=0)
+            if found:
+                counter += 1
+                self.current_tab.replace(replace)
+                while self.current_tab.findNext():
+                    self.current_tab.replace(replace)
+                    counter += 1
+            return counter
+        else:
+            found = self.current_tab.findFirst(target_text, True, True, False,
+                                               True)
+            if found:
+                self.current_tab.replace(replace)
+                return 1
+            else:
+                return 0
+
+    def highlight_text(self, target_text):
+        """
+        Highlight the first match from the current position of the cursor in
+        the current tab for the target_text. Returns True if there's a match.
+        """
+        if self.current_tab:
+            return self.current_tab.findFirst(target_text, True, True, False,
+                                              True)
+        else:
+            return False
+
+    def connect_toggle_comments(self, handler, shortcut):
+        """
+        Create a keyboard shortcut and associate it with a handler for toggling
+        comments on highlighted lines.
+        """
+        self.toggle_comments_shortcut = QShortcut(QKeySequence(shortcut), self)
+        self.toggle_comments_shortcut.activated.connect(handler)
+
+    def toggle_comments(self):
+        """
+        Toggle comments on/off for all selected line in the currently active
+        tab.
+        """
+        if self.current_tab:
+            self.current_tab.toggle_comments()
 
 
 class StatusBar(QStatusBar):

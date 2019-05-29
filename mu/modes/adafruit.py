@@ -34,6 +34,7 @@ class AdafruitMode(MicroPythonMode):
     icon = 'adafruit'
     save_timeout = 0  #: Don't autosave on Adafruit boards. Casues a restart.
     connected = True  #: is the Adafruit board connected.
+    force_interrupt = False  #: NO keyboard interrupt on serial connection.
     valid_boards = [
         (0x239A, 0x8015),  # Adafruit Feather M0 CircuitPython
         (0x239A, 0x8023),  # Adafruit Feather M0 Express CircuitPython
@@ -47,7 +48,29 @@ class AdafruitMode(MicroPythonMode):
         (0x239A, 0x8025),  # Adafruit Feather RadioFruit
         (0x239A, 0x8026),  # Adafruit Feather M4
         (0x239A, 0x8028),  # Adafruit pIRKey M0
+        (0x239A, 0x802A),  # Adafruit Feather 52840
+        (0x239A, 0x802C),  # Adafruit Itsy M4
+        (0x239A, 0x802E),  # Adafruit CRICKit M0
+        (0x239A, 0xD1ED),  # Adafruit HalloWing M0
+        (0x239A, 0x8030),  # Adafruit NeoTrellis M4
+        (0x239A, 0x8032),  # Grand Central
+        (0x2B04, 0xC00C),  # Particle Argon
+        (0x2B04, 0xC00D),  # Particle Boron
+        (0x2B04, 0xC00E),  # Particle Xenon
+        (0x239A, 0x8034),  # future board
+        (0x239A, 0x8036),  # future board
+        (0x239A, 0x8038),  # future board
+        (0x239A, 0x803A),  # future board
+        (0x239A, 0x803C),  # future board
+        (0x239A, 0x803E),  # future board
+        (0x239A, None),    # Any Adafruit Boards
     ]
+    # Modules built into CircuitPython which mustn't be used as file names
+    # for source code.
+    module_names = {'storage', 'os', 'touchio', 'microcontroller', 'bitbangio',
+                    'digitalio', 'audiobusio', 'multiterminal', 'nvm',
+                    'pulseio', 'usb_hid', 'analogio', 'time', 'busio',
+                    'random', 'audioio', 'sys', 'math', 'builtins'}
 
     def actions(self):
         """
@@ -56,11 +79,11 @@ class AdafruitMode(MicroPythonMode):
         """
         buttons = [
             {
-                'name': 'repl',
-                'display_name': _('REPL'),
-                'description': _('Use the REPL for live coding.'),
+                'name': 'serial',
+                'display_name': _('Serial'),
+                'description': _('Open a serial connection to your device.'),
                 'handler': self.toggle_repl,
-                'shortcut': 'CTRL+Shift+I',
+                'shortcut': 'CTRL+Shift+U',
             }, ]
         if CHARTS:
             buttons.append({

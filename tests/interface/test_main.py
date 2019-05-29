@@ -11,6 +11,7 @@ import mu.interface.main
 import mu.interface.themes
 import mu.interface.editor
 import pytest
+import sys
 
 
 def test_ButtonBar_init():
@@ -83,8 +84,11 @@ def test_ButtonBar_change_mode():
         mock_reset.reset_mock()
         b.change_mode(mock_mode)
         mock_reset.assert_called_once_with()
-        assert mock_add_action.call_count == 11
-        assert mock_add_separator.call_count == 4
+        if sys.version_info < (3, 6):
+            assert mock_add_action.call_count == 11
+        else:
+            assert mock_add_action.call_count == 12
+        assert mock_add_separator.call_count == 5
 
 
 def test_ButtonBar_set_responsive_mode():
@@ -95,7 +99,7 @@ def test_ButtonBar_set_responsive_mode():
     with mock.patch('mu.interface.main.ButtonBar.setIconSize', mock_icon_size):
         bb = mu.interface.main.ButtonBar(None)
         bb.setStyleSheet = mock.MagicMock()
-        bb.set_responsive_mode(1024, 800)
+        bb.set_responsive_mode(1124, 800)
         mock_icon_size.assert_called_with(QSize(64, 64))
         default_font = str(mu.interface.themes.DEFAULT_FONT_SIZE)
         style = "QWidget{font-size: " + default_font + "px;}"
@@ -235,6 +239,8 @@ def test_Window_attributes():
     w = mu.interface.main.Window()
     assert w.title == "Mu {}".format(__version__)
     assert w.icon == "icon"
+    assert w.zoom_position == 2
+    assert w.zooms == ('xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl')
 
 
 def test_Window_resizeEvent():
@@ -264,10 +270,9 @@ def test_Window_select_mode_selected():
     current_mode = 'python'
     with mock.patch('mu.interface.main.ModeSelector', mock_mode_selector):
         w = mu.interface.main.Window()
-        result = w.select_mode(mock_modes, current_mode, 'day')
+        result = w.select_mode(mock_modes, current_mode)
         assert result == 'foo'
-        mock_selector.setup.assert_called_once_with(mock_modes, current_mode,
-                                                    'day')
+        mock_selector.setup.assert_called_once_with(mock_modes, current_mode)
         mock_selector.exec.assert_called_once_with()
 
 
@@ -283,7 +288,7 @@ def test_Window_select_mode_cancelled():
     current_mode = 'python'
     with mock.patch('mu.interface.main.ModeSelector', mock_mode_selector):
         w = mu.interface.main.Window()
-        result = w.select_mode(mock_modes, current_mode, 'day')
+        result = w.select_mode(mock_modes, current_mode)
         assert result is None
 
 
@@ -307,15 +312,24 @@ def test_Window_change_mode():
     tab2.set_api.assert_called_once_with(api)
 
 
+def test_Window_set_zoom():
+    """
+    Ensure the correct signal is emitted.
+    """
+    w = mu.interface.main.Window()
+    w._zoom_in = mock.MagicMock()
+    w.set_zoom()
+    w._zoom_in.emit.assert_called_once_with('m')
+
+
 def test_Window_zoom_in():
     """
     Ensure the correct signal is emitted.
     """
     w = mu.interface.main.Window()
     w._zoom_in = mock.MagicMock()
-    w._zoom_in.emit = mock.MagicMock()
     w.zoom_in()
-    w._zoom_in.emit.assert_called_once_with(2)
+    w._zoom_in.emit.assert_called_once_with('l')
 
 
 def test_Window_zoom_out():
@@ -324,9 +338,8 @@ def test_Window_zoom_out():
     """
     w = mu.interface.main.Window()
     w._zoom_out = mock.MagicMock()
-    w._zoom_out.emit = mock.MagicMock()
     w.zoom_out()
-    w._zoom_out.emit.assert_called_once_with(2)
+    w._zoom_out.emit.assert_called_once_with('s')
 
 
 def test_Window_connect_zoom():
@@ -385,10 +398,11 @@ def test_Window_get_load_path():
     w = mu.interface.main.Window()
     w.widget = mock.MagicMock()
     with mock.patch('mu.interface.main.QFileDialog', mock_fd):
-        assert w.get_load_path('micropython') == path
-    mock_fd.getOpenFileName.assert_called_once_with(w.widget, 'Open file',
-                                                    'micropython',
-                                                    '*.py *.PY *.hex')
+        returned_path = w.get_load_path('micropython', '*.py *.hex *.PY *.HEX')
+    assert returned_path == path
+    assert w.previous_folder == '/foo'  # Note lack of filename.
+    mock_fd.getOpenFileName.assert_called_once_with(
+        w.widget, 'Open file', 'micropython', '*.py *.hex *.PY *.HEX')
 
 
 def test_Window_get_save_path():
@@ -402,9 +416,11 @@ def test_Window_get_save_path():
     w = mu.interface.main.Window()
     w.widget = mock.MagicMock()
     with mock.patch('mu.interface.main.QFileDialog', mock_fd):
-        assert w.get_save_path('micropython') == path
+        returned_path = w.get_save_path('micropython')
     mock_fd.getSaveFileName.assert_called_once_with(w.widget, 'Save file',
                                                     'micropython')
+    assert w.previous_folder == '/foo'  # Note lack of filename.
+    assert returned_path == path
 
 
 def test_Window_get_microbit_path():
@@ -674,6 +690,16 @@ def test_Window_add_filesystem():
     w.connect_zoom.assert_called_once_with(mock_fs)
 
 
+def test_Window_add_filesystem_open_signal():
+    w = mu.interface.main.Window()
+    w.open_file = mock.MagicMock()
+    mock_open_emit = mock.MagicMock()
+    w.open_file.emit = mock_open_emit
+    pane = w.add_filesystem('homepath', mock.MagicMock())
+    pane.open_file.emit('test')
+    mock_open_emit.assert_called_once_with('test')
+
+
 def test_Window_add_micropython_repl():
     """
     Ensure the expected object is instantiated and add_repl is called for a
@@ -692,11 +718,36 @@ def test_Window_add_micropython_repl():
     mock_repl_class = mock.MagicMock(return_value=mock_repl)
     with mock.patch('mu.interface.main.MicroPythonREPLPane', mock_repl_class):
         w.add_micropython_repl('COM0', 'Test REPL')
-    mock_repl_class.assert_called_once_with(serial=w.serial, theme=w.theme)
+    mock_repl_class.assert_called_once_with(serial=w.serial)
     w.open_serial_link.assert_called_once_with('COM0')
     assert w.serial.write.call_count == 2
     assert w.serial.write.call_args_list[0][0][0] == b'\x02'
     assert w.serial.write.call_args_list[1][0][0] == b'\x03'
+    w.data_received.connect.assert_called_once_with(mock_repl.process_bytes)
+    w.add_repl.assert_called_once_with(mock_repl, 'Test REPL')
+
+
+def test_Window_add_micropython_repl_no_interrupt():
+    """
+    Ensure the expected object is instantiated and add_repl is called for a
+    MicroPython based REPL.
+    """
+    w = mu.interface.main.Window()
+    w.theme = mock.MagicMock()
+    w.add_repl = mock.MagicMock()
+
+    def side_effect(self, w=w):
+        w.serial = mock.MagicMock()
+
+    w.open_serial_link = mock.MagicMock(side_effect=side_effect)
+    w.data_received = mock.MagicMock()
+    mock_repl = mock.MagicMock()
+    mock_repl_class = mock.MagicMock(return_value=mock_repl)
+    with mock.patch('mu.interface.main.MicroPythonREPLPane', mock_repl_class):
+        w.add_micropython_repl('COM0', 'Test REPL', False)
+    mock_repl_class.assert_called_once_with(serial=w.serial)
+    w.open_serial_link.assert_called_once_with('COM0')
+    assert w.serial.write.call_count == 0
     w.data_received.connect.assert_called_once_with(mock_repl.process_bytes)
     w.add_repl.assert_called_once_with(mock_repl, 'Test REPL')
 
@@ -720,7 +771,7 @@ def test_Window_add_micropython_plotter():
     mock_mode = mock.MagicMock()
     with mock.patch('mu.interface.main.PlotterPane', mock_plotter_class):
         w.add_micropython_plotter('COM0', 'MicroPython Plotter', mock_mode)
-    mock_plotter_class.assert_called_once_with(theme=w.theme)
+    mock_plotter_class.assert_called_once_with()
     w.open_serial_link.assert_called_once_with('COM0')
     w.data_received.connect.assert_called_once_with(mock_plotter.process_bytes)
     mock_plotter.data_flood.connect.\
@@ -762,7 +813,7 @@ def test_Window_add_jupyter_repl():
     mock_pane_class = mock.MagicMock(return_value=mock_pane)
     with mock.patch('mu.interface.main.JupyterREPLPane', mock_pane_class):
         w.add_jupyter_repl(mock_kernel_manager, mock_kernel_client)
-    mock_pane_class.assert_called_once_with(theme=w.theme)
+    mock_pane_class.assert_called_once_with()
     assert mock_pane.kernel_manager == mock_kernel_manager
     assert mock_pane.kernel_client == mock_kernel_client
     assert mock_kernel_manager.kernel.gui == 'qt4'
@@ -797,7 +848,6 @@ def test_Window_add_plotter():
     w.theme = mock.MagicMock()
     w.addDockWidget = mock.MagicMock()
     mock_plotter_pane = mock.MagicMock()
-    mock_plotter_pane.setTheme = mock.MagicMock()
     mock_dock = mock.MagicMock()
     mock_dock_class = mock.MagicMock(return_value=mock_dock)
     with mock.patch('mu.interface.main.QDockWidget', mock_dock_class):
@@ -881,7 +931,8 @@ def test_Window_update_debug_inspector():
     w = mu.interface.main.Window()
     w.debug_model = mock.MagicMock()
     mock_standard_item = mock.MagicMock()
-    with mock.patch('mu.interface.main.QStandardItem', mock_standard_item):
+    with mock.patch('mu.interface.main.DebugInspectorItem',
+                    mock_standard_item):
         w.update_debug_inspector(locals_dict)
     w.debug_model.clear.assert_called_once_with()
     w.debug_model.setHorizontalHeaderLabels(['Name', 'Value', ])
@@ -901,7 +952,8 @@ def test_Window_update_debug_inspector_with_exception():
     w.debug_model = mock.MagicMock()
     mock_standard_item = mock.MagicMock()
     mock_eval = mock.MagicMock(side_effect=Exception('BOOM!'))
-    with mock.patch('mu.interface.main.QStandardItem', mock_standard_item), \
+    with mock.patch(
+        'mu.interface.main.DebugInspectorItem', mock_standard_item), \
             mock.patch('builtins.eval', mock_eval):
         w.update_debug_inspector(locals_dict)
     # You just have to believe this is correct. I checked! :-)
@@ -1028,7 +1080,6 @@ def test_Window_set_theme():
     Check the theme is correctly applied to the window.
     """
     w = mu.interface.main.Window()
-    w.setStyleSheet = mock.MagicMock(return_value=None)
     w.tabs = mock.MagicMock()
     w.tabs.count = mock.MagicMock(return_value=2)
     tab1 = mock.MagicMock()
@@ -1048,8 +1099,10 @@ def test_Window_set_theme():
     w.plotter = mock.MagicMock()
     w.plotter_pane = mock.MagicMock()
     w.plotter_pane.set_theme = mock.MagicMock()
+    w.load_theme = mock.MagicMock()
+    w.load_theme.emit = mock.MagicMock()
     w.set_theme('night')
-    assert w.setStyleSheet.call_count == 1
+    w.load_theme.emit.assert_called_once_with('night')
     assert w.theme == 'night'
     tab1.set_theme.assert_called_once_with(mu.interface.themes.NightTheme)
     tab2.set_theme.assert_called_once_with(mu.interface.themes.NightTheme)
@@ -1058,14 +1111,14 @@ def test_Window_set_theme():
                       QIcon)
     w.repl_pane.set_theme.assert_called_once_with('night')
     w.plotter_pane.set_theme.assert_called_once_with('night')
-    w.setStyleSheet.reset_mock()
+    w.load_theme.emit.reset_mock()
     tab1.set_theme.reset_mock()
     tab2.set_theme.reset_mock()
     w.button_bar.slots['theme'].setIcon.reset_mock()
     w.repl_pane.set_theme.reset_mock()
     w.plotter_pane.set_theme.reset_mock()
     w.set_theme('contrast')
-    assert w.setStyleSheet.call_count == 1
+    w.load_theme.emit.assert_called_once_with('contrast')
     assert w.theme == 'contrast'
     tab1.set_theme.assert_called_once_with(mu.interface.themes.ContrastTheme)
     tab2.set_theme.assert_called_once_with(mu.interface.themes.ContrastTheme)
@@ -1074,14 +1127,14 @@ def test_Window_set_theme():
                       QIcon)
     w.repl_pane.set_theme.assert_called_once_with('contrast')
     w.plotter_pane.set_theme.assert_called_once_with('contrast')
-    w.setStyleSheet.reset_mock()
+    w.load_theme.emit.reset_mock()
     tab1.set_theme.reset_mock()
     tab2.set_theme.reset_mock()
     w.button_bar.slots['theme'].setIcon.reset_mock()
     w.repl_pane.set_theme.reset_mock()
     w.plotter_pane.set_theme.reset_mock()
     w.set_theme('day')
-    assert w.setStyleSheet.call_count == 1
+    w.load_theme.emit.assert_called_once_with('day')
     assert w.theme == 'day'
     tab1.set_theme.assert_called_once_with(mu.interface.themes.DayTheme)
     tab2.set_theme.assert_called_once_with(mu.interface.themes.DayTheme)
@@ -1103,11 +1156,48 @@ def test_Window_show_admin():
     mock_admin_display.return_value = mock_admin_box
     with mock.patch('mu.interface.main.AdminDialog', mock_admin_display):
         w = mu.interface.main.Window()
-        result = w.show_admin('log', 'envars', 'day')
-        mock_admin_display.assert_called_once_with()
-        mock_admin_box.setup.assert_called_once_with('log', 'envars', 'day')
+        result = w.show_admin('log', 'envars', 'packages')
+        mock_admin_display.assert_called_once_with(w)
+        mock_admin_box.setup.assert_called_once_with('log', 'envars',
+                                                     'packages')
         mock_admin_box.exec.assert_called_once_with()
         assert result == 'this is the expected result'
+
+
+def test_Window_show_admin_cancelled():
+    """
+    If the modal dialog for the admin functions is cancelled, ensure an
+    empty dictionary (indicating a "falsey" no change) is returned.
+    """
+    mock_admin_display = mock.MagicMock()
+    mock_admin_box = mock.MagicMock()
+    mock_admin_box.exec.return_value = False
+    mock_admin_display.return_value = mock_admin_box
+    with mock.patch('mu.interface.main.AdminDialog', mock_admin_display):
+        w = mu.interface.main.Window()
+        result = w.show_admin('log', 'envars', 'packages')
+        mock_admin_display.assert_called_once_with(w)
+        mock_admin_box.setup.assert_called_once_with('log', 'envars',
+                                                     'packages')
+        mock_admin_box.exec.assert_called_once_with()
+        assert result == {}
+
+
+def test_Window_sync_packages():
+    """
+    Ensure the expected modal dialog indicating progress of third party package
+    add/removal is displayed with the expected settings.
+    """
+    mock_package_dialog = mock.MagicMock()
+    with mock.patch('mu.interface.main.PackageDialog', mock_package_dialog):
+        w = mu.interface.main.Window()
+        to_remove = {'foo'}
+        to_add = {'bar'}
+        module_dir = 'baz'
+        w.sync_packages(to_remove, to_add, module_dir)
+        dialog = mock_package_dialog()
+        dialog.setup.assert_called_once_with(to_remove, to_add, module_dir)
+        dialog.exec.assert_called_once_with()
 
 
 def test_Window_show_message():
@@ -1338,7 +1428,7 @@ def test_Window_setup():
     assert w.setWindowIcon.call_count == 1
     assert isinstance(w.setWindowIcon.call_args[0][0], QIcon)
     w.update_title.assert_called_once_with()
-    w.setMinimumSize.assert_called_once_with(820, 400)
+    w.setMinimumSize.assert_called_once_with(920, 400)
     assert w.widget == mock_widget
     assert w.button_bar == mock_button_bar
     assert w.tabs == mock_qtw
@@ -1449,6 +1539,10 @@ def test_Window_open_directory_from_os_freedesktop():
 
 
 def test_Window_open_file_event():
+    """
+    Ensure the open_file event is emitted when a tab's open_file is
+    triggered.
+    """
     editor = mu.interface.editor.EditorPane('/foo/bar.py', 'baz')
     window = mu.interface.main.Window()
     window.breakpoint_toggle = mock.MagicMock()
@@ -1471,6 +1565,165 @@ def test_Window_open_file_event():
     mock_editor.assert_called_once_with(path, text, '\n')
     editor.open_file.emit('/foo/bar.py')
     mock_emit.assert_called_once_with('/foo/bar.py')
+
+
+def test_Window_connect_find_replace():
+    """
+    Ensure a shortcut is created with teh expected shortcut and handler
+    function.
+    """
+    window = mu.interface.main.Window()
+    mock_handler = mock.MagicMock()
+    mock_shortcut = mock.MagicMock()
+    mock_sequence = mock.MagicMock()
+    with mock.patch('mu.interface.main.QShortcut', mock_shortcut), \
+            mock.patch('mu.interface.main.QKeySequence', mock_sequence):
+        window.connect_find_replace(mock_handler, 'Ctrl+F')
+    mock_sequence.assert_called_once_with('Ctrl+F')
+    ks = mock_sequence('Ctrl+F')
+    mock_shortcut.assert_called_once_with(ks, window)
+    shortcut = mock_shortcut(ks, window)
+    shortcut.activated.connect.assert_called_once_with(mock_handler)
+
+
+def test_Window_show_find_replace():
+    """
+    The find/replace dialog is setup with the right arguments and, if
+    successfully closed, returns the expected result.
+    """
+    window = mu.interface.main.Window()
+    mock_dialog = mock.MagicMock()
+    mock_dialog.find.return_value = 'foo'
+    mock_dialog.replace.return_value = 'bar'
+    mock_dialog.replace_flag.return_value = True
+    mock_FRDialog = mock.MagicMock(return_value=mock_dialog)
+    mock_FRDialog.exec.return_value = True
+    with mock.patch('mu.interface.main.FindReplaceDialog', mock_FRDialog):
+        result = window.show_find_replace('', '', False)
+    mock_dialog.setup.assert_called_once_with('', '', False)
+    assert result == ('foo', 'bar', True)
+
+
+def test_Window_replace_text_not_current_tab():
+    """
+    If there is currently no open tab in which to search, return 0 (to indicate
+    no changes have been made).
+    """
+    w = mu.interface.main.Window()
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget.return_value = None
+    assert w.replace_text('foo', 'bar', False) == 0
+
+
+def test_Window_replace_text_not_global_found():
+    """
+    If the text to be replaced is found in the source, and the global_replace
+    flag is false, return 1 (to indicate the number of changes made).
+    """
+    w = mu.interface.main.Window()
+    mock_tab = mock.MagicMock()
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget.return_value = mock_tab
+    mock_tab.findFirst.return_value = True
+    assert w.replace_text('foo', 'bar', False) == 1
+    mock_tab.replace.assert_called_once_with('bar')
+
+
+def test_Window_replace_text_not_global_missing():
+    """
+    If the text to be replaced is missing in the source, and the global_replace
+    flag is false, return 0 (to indicate no change made).
+    """
+    w = mu.interface.main.Window()
+    mock_tab = mock.MagicMock()
+    mock_tab.findFirst.return_value = False
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget.return_value = mock_tab
+    assert w.replace_text('foo', 'bar', False) == 0
+
+
+def test_Window_replace_text_global_found():
+    """
+    If the text to be replaced is found several times in the source, and the
+    global_replace flag is true, return X (to indicate X changes made) -- where
+    X is some integer.
+    """
+    w = mu.interface.main.Window()
+    mock_tab = mock.MagicMock()
+    mock_tab.findFirst.return_value = True
+    mock_tab.findNext.side_effect = [True, False, ]
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget.return_value = mock_tab
+    assert w.replace_text('foo', 'bar', True) == 2
+    assert mock_tab.replace.call_count == 2
+
+
+def test_Window_replace_text_global_missing():
+    """
+    If the text to be replaced is missing in the source, and the global_replace
+    flag is true, return 0 (to indicate no change made).
+    """
+    w = mu.interface.main.Window()
+    mock_tab = mock.MagicMock()
+    mock_tab.findFirst.return_value = False
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget.return_value = mock_tab
+    assert w.replace_text('foo', 'bar', True) == 0
+
+
+def test_Window_highlight_text():
+    """
+    Given target_text, highlights the first instance via Scintilla's findFirst
+    method.
+    """
+    w = mu.interface.main.Window()
+    mock_tab = mock.MagicMock()
+    mock_tab.findFirst.return_value = True
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget.return_value = mock_tab
+    assert w.highlight_text('foo')
+    mock_tab.findFirst.assert_called_once_with('foo', True, True, False, True)
+
+
+def test_Window_highlight_text_no_tab():
+    """
+    If there's no current tab, just return False.
+    """
+    w = mu.interface.main.Window()
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget.return_value = None
+    assert w.highlight_text('foo') is False
+
+
+def test_Window_connect_toggle_comments():
+    """
+    Ensure the passed in handler is connected to a shortcut triggered by the
+    shortcut.
+    """
+    window = mu.interface.main.Window()
+    mock_handler = mock.MagicMock()
+    mock_shortcut = mock.MagicMock()
+    mock_sequence = mock.MagicMock()
+    with mock.patch('mu.interface.main.QShortcut', mock_shortcut), \
+            mock.patch('mu.interface.main.QKeySequence', mock_sequence):
+        window.connect_toggle_comments(mock_handler, 'Ctrl+K')
+    mock_sequence.assert_called_once_with('Ctrl+K')
+    ks = mock_sequence('Ctrl+K')
+    mock_shortcut.assert_called_once_with(ks, window)
+    shortcut = mock_shortcut(ks, window)
+    shortcut.activated.connect.assert_called_once_with(mock_handler)
+
+
+def test_Window_toggle_comments():
+    """
+    If there's a current tab, call its toggle_comments method.
+    """
+    w = mu.interface.main.Window()
+    mock_tab = mock.MagicMock()
+    w.tabs = mock.MagicMock()
+    w.tabs.currentWidget.return_value = mock_tab
+    w.toggle_comments()
+    mock_tab.toggle_comments.assert_called_once_with()
 
 
 def test_StatusBar_init():

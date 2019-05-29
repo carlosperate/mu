@@ -20,6 +20,29 @@ Mu: A Python Code Editor
     If you're interested in the fun, educational, inspiring and sometimes
     hilarious ways in which people use Mu, check out: https://madewith.mu/
 
+Quickstart
+----------
+
+Mu works with Python 3.6 or above.
+
+Clone the repository::
+
+    git clone https://github.com/mu-editor/mu.git
+
+Make a virtualenv, then install the requirements::
+
+    pip install -e .[dev]
+
+Start Mu::
+
+    python run.py
+
+Run the test suite::
+
+    make check
+
+Read on to learn more about Mu, its aims and how you can contribute.
+
 What?
 -----
 
@@ -62,6 +85,15 @@ for the BBC's `micro:bit project <http://microbit.org/>`_. Many people asked if
 Mu could be turned into a generic beginner's code editor and, thanks to the
 wonderful support of the `Raspberry Pi Foundation <http://raspberrypi.org/>`_
 the work needed to make such changes was done over the summer of 2017.
+
+The following video of a talk given at `PyCon 2018 <https://us.pycon.org/2018/>`_
+outlines the story of Mu:
+
+.. raw:: html
+
+    <div style="position: relative; height: 0; overflow: hidden; max-width: 100%; height: auto;">
+        <iframe width="560" height="315" src="https://www.youtube-nocookie.com/embed/T5IAf5vGGSk?rel=0" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>
+    </div>
 
 How?
 ----
@@ -124,6 +156,8 @@ Contents:
    website.rst
    api.rst
    design.rst
+   release.rst
+   roadmap.rst
    authors.rst
    changes.rst
    license.rst
