@@ -77,3 +77,8 @@ target/
 
 # Movie
 *.mp4
+
+# Virtual Environment
+.venv*/
+/mu/wheels/*.whl
+/baseline_packages.json

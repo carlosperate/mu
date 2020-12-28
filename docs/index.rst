@@ -29,9 +29,13 @@ Clone the repository::
 
     git clone https://github.com/mu-editor/mu.git
 
+(Recommended) Upgrade local pip::
+
+    pip install --upgrade pip
+
 Make a virtualenv, then install the requirements::
 
-    pip install -e .[dev]
+    pip install -e ".[dev]"
 
 Start Mu::
 

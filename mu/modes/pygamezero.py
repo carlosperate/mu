@@ -1,5 +1,5 @@
 """
-The PyGameZero mode for the Mu editor.
+The Pygame Zero mode for the Mu editor.
 
 Copyright (c) 2015-2017 Nicholas H.Tollervey and others (see the AUTHORS file).
 
@@ -21,6 +21,7 @@ import logging
 from mu.modes.base import BaseMode
 from mu.modes.api import PYTHON3_APIS, SHARED_APIS, PI_APIS, PYGAMEZERO_APIS
 from mu.resources import load_icon
+from ..virtual_environment import venv
 
 
 logger = logging.getLogger(__name__)
@@ -31,13 +32,27 @@ class PyGameZeroMode(BaseMode):
     Represents the functionality required by the PyGameZero mode.
     """
 
-    name = _('Pygame Zero')
-    description = _('Make games with Pygame Zero.')
-    icon = 'pygamezero'
+    name = _("Pygame Zero")
+    short_name = "pygamezero"
+    description = _("Make games with Pygame Zero.")
+    icon = "pygamezero"
     runner = None
-    builtins = ['clock', 'music', 'Actor', 'keyboard', 'animate', 'Rect',
-                'ZRect', 'images', 'sounds', 'mouse', 'keys', 'keymods',
-                'exit', 'screen']
+    builtins = [
+        "clock",
+        "music",
+        "Actor",
+        "keyboard",
+        "animate",
+        "Rect",
+        "ZRect",
+        "images",
+        "sounds",
+        "mouse",
+        "keys",
+        "keymods",
+        "exit",
+        "screen",
+    ]
 
     def actions(self):
         """
@@ -46,39 +61,39 @@ class PyGameZeroMode(BaseMode):
         """
         return [
             {
-                'name': 'play',
-                'display_name': _('Play'),
-                'description': _('Play your Pygame Zero game.'),
-                'handler': self.play_toggle,
-                'shortcut': 'F5',
+                "name": "play",
+                "display_name": _("Play"),
+                "description": _("Play your Pygame Zero game."),
+                "handler": self.play_toggle,
+                "shortcut": "F5",
             },
             {
-                'name': 'images',
-                'display_name': _('Images'),
-                'description': _('Show the images used by Pygame Zero.'),
-                'handler': self.show_images,
-                'shortcut': 'Ctrl+Shift+I',
+                "name": "images",
+                "display_name": _("Images"),
+                "description": _("Show the images used by Pygame Zero."),
+                "handler": self.show_images,
+                "shortcut": "Ctrl+Shift+I",
             },
             {
-                'name': 'fonts',
-                'display_name': _('Fonts'),
-                'description': _('Show the fonts used by Pygame Zero.'),
-                'handler': self.show_fonts,
-                'shortcut': 'Ctrl+Shift+F',
+                "name": "fonts",
+                "display_name": _("Fonts"),
+                "description": _("Show the fonts used by Pygame Zero."),
+                "handler": self.show_fonts,
+                "shortcut": "Ctrl+Shift+F",
             },
             {
-                'name': 'sounds',
-                'display_name': _('Sounds'),
-                'description': _('Show the sounds used by Pygame Zero.'),
-                'handler': self.show_sounds,
-                'shortcut': 'Ctrl+Shift+N',
+                "name": "sounds",
+                "display_name": _("Sounds"),
+                "description": _("Show the sounds used by Pygame Zero."),
+                "handler": self.show_sounds,
+                "shortcut": "Ctrl+Shift+N",
             },
             {
-                'name': 'music',
-                'display_name': _('Music'),
-                'description': _('Show the music used by Pygame Zero.'),
-                'handler': self.show_music,
-                'shortcut': 'Ctrl+Shift+M',
+                "name": "music",
+                "display_name": _("Music"),
+                "description": _("Show the music used by Pygame Zero."),
+                "handler": self.show_music,
+                "shortcut": "Ctrl+Shift+M",
             },
         ]
 
@@ -95,18 +110,18 @@ class PyGameZeroMode(BaseMode):
         """
         if self.runner:
             self.stop_game()
-            play_slot = self.view.button_bar.slots['play']
-            play_slot.setIcon(load_icon('play'))
-            play_slot.setText(_('Play'))
-            play_slot.setToolTip(_('Play your Pygame Zero game.'))
+            play_slot = self.view.button_bar.slots["play"]
+            play_slot.setIcon(load_icon("play"))
+            play_slot.setText(_("Play"))
+            play_slot.setToolTip(_("Play your Pygame Zero game."))
             self.set_buttons(modes=True)
         else:
             self.run_game()
             if self.runner:
-                play_slot = self.view.button_bar.slots['play']
-                play_slot.setIcon(load_icon('stop'))
-                play_slot.setText(_('Stop'))
-                play_slot.setToolTip(_('Stop your Pygame Zero game.'))
+                play_slot = self.view.button_bar.slots["play"]
+                play_slot.setIcon(load_icon("stop"))
+                play_slot.setText(_("Stop"))
+                play_slot.setToolTip(_("Stop your Pygame Zero game."))
                 self.set_buttons(modes=False)
 
     def run_game(self):
@@ -116,7 +131,7 @@ class PyGameZeroMode(BaseMode):
         # Grab the Python file.
         tab = self.view.current_tab
         if tab is None:
-            logger.debug('There is no active text editor.')
+            logger.debug("There is no active text editor.")
             self.stop_game()
             return
         if tab.path is None:
@@ -128,20 +143,24 @@ class PyGameZeroMode(BaseMode):
                 self.editor.save_tab_to_file(tab)
             logger.debug(tab.text())
             envars = self.editor.envars
-            args = ['-m', 'pgzero']
+            args = ["-m", "pgzero"]
             cwd = os.path.dirname(tab.path)
-            self.runner = self.view.add_python3_runner(tab.path,
-                                                       cwd,
-                                                       interactive=False,
-                                                       envars=envars,
-                                                       python_args=args)
+
+            self.runner = self.view.add_python3_runner(
+                interpreter=venv.interpreter,
+                script_name=tab.path,
+                working_directory=cwd,
+                interactive=False,
+                envars=envars,
+                python_args=args,
+            )
             self.runner.process.waitForStarted()
 
     def stop_game(self):
         """
         Stop the currently running game.
         """
-        logger.debug('Stopping script.')
+        logger.debug("Stopping script.")
         if self.runner:
             self.runner.process.kill()
             self.runner.process.waitForFinished()
@@ -150,40 +169,36 @@ class PyGameZeroMode(BaseMode):
 
     def show_images(self, event):
         """
-        Open the directory containing the image assets used by PyGame Zero.
+        Open the directory containing the image assets used by Pygame Zero.
 
         This should open the host OS's file system explorer so users can drag
         new files into the opened folder.
         """
-        image_dir = os.path.join(self.workspace_dir(), 'images')
-        self.view.open_directory_from_os(image_dir)
+        self.view.open_directory_from_os(self.assets_dir("images"))
 
     def show_fonts(self, event):
         """
-        Open the directory containing the font assets used by PyGame Zero.
+        Open the directory containing the font assets used by Pygame Zero.
 
         This should open the host OS's file system explorer so users can drag
         new files into the opened folder.
         """
-        image_dir = os.path.join(self.workspace_dir(), 'fonts')
-        self.view.open_directory_from_os(image_dir)
+        self.view.open_directory_from_os(self.assets_dir("fonts"))
 
     def show_sounds(self, event):
         """
-        Open the directory containing the sound assets used by PyGame Zero.
+        Open the directory containing the sound assets used by Pygame Zero.
 
         This should open the host OS's file system explorer so users can drag
         new files into the opened folder.
         """
-        sound_dir = os.path.join(self.workspace_dir(), 'sounds')
-        self.view.open_directory_from_os(sound_dir)
+        self.view.open_directory_from_os(self.assets_dir("sounds"))
 
     def show_music(self, event):
         """
-        Open the directory containing the music assets used by PyGame Zero.
+        Open the directory containing the music assets used by Pygame Zero.
 
         This should open the host OS's file system explorer so users can drag
         new files into the opened folder.
         """
-        sound_dir = os.path.join(self.workspace_dir(), 'music')
-        self.view.open_directory_from_os(sound_dir)
+        self.view.open_directory_from_os(self.assets_dir("music"))

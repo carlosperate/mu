@@ -82,18 +82,25 @@ QTabBar::tab::selected {
     background: #555;
 }
 
-QTabBar::close-button {
-    image: url(images:close-tab.png);
-    padding: 3px;
-    /* See https://github.com/mu-editor/mu/issues/594 */
-    /* subcontrol-position: right; */
+QTabBar::tab QLabel {
+    background: transparent;
 }
 
-QTabBar::close-button:hover {
-    image: url(images:close-tab.png);
+QTabBar::tab QPushButton {
     padding: 3px;
+    margin: 0;
+    background: transparent;
+    border: none;
+    min-width: 10px;
+    min-height: 10px;
+    max-width: 10px;
+    max-height: 10px;
+}
+
+QTabBar::tab QPushButton:hover {
     background: #c93827;
     border-radius: 3px;
+    border: none;
 }
 
 QTabWidget::pane {
@@ -114,6 +121,11 @@ QTreeView::item:selected, QTreeView::item:hover, QTreeView::item:focus {
 QStatusBar QLabel {
     padding: 2px;
     margin: 0;
+}
+
+#DeviceSelector QComboBox {
+    padding: 4px 25px 4px 3px;
+    margin: 2px;
 }
 
 #AdministrationLabel:hover, #AdministrationLabel:focus {
@@ -170,6 +182,10 @@ QPushButton:hover {
 
 QPushButton:pressed {
     background: #111;
+}
+
+QPushButton:disabled {
+    background:#aaa;
 }
 
 QAbstractScrollArea::corner {
@@ -278,4 +294,30 @@ QTreeView::branch:has-children:open {
 
 QTreeView::branch:has-children:closed {
     image: url(images:scroll-right.png);
+}
+
+QComboBox {
+    padding: 2px;
+    border: 1px solid white;
+}
+
+QComboBox::drop-down {
+    border: 0;
+    width: 15px;
+    image: unset;
+    padding-right: 2px;
+}
+
+QComboBox::down-arrow {
+    image: url(images:dropdown-arrow-contrast.png);
+}
+
+QGroupBox {
+    border: 1px solid white;
+    margin-top: 1ex; /* leave space at the top for the title */
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
 }
